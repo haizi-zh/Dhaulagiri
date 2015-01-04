@@ -43,8 +43,9 @@ def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, u
     :param col_name:
     :return:
     """
-    if profile:
-        section = getattr(load_config(), 'profile', {})
+    cfg = dict(load_config())
+    if profile and profile in cfg:
+        section = cfg[profile]
         host = section.get('host', 'localhost')
         port = int(section.get('port', '27017'))
         user = section.get('user', None)

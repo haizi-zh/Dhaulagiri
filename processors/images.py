@@ -41,7 +41,7 @@ class ImageTransfer(object):
         import gevent
         from mongo import get_mongodb
 
-        col = get_mongodb('imagestore', 'Images')
+        col = get_mongodb('imagestore', 'Images', profile='mongo')
 
         cursor = col.find({'key': re.compile(r'^assets'), 'bucket': None}, snapshot=True)
         cursor.skip(self.args.skip)
