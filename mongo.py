@@ -43,6 +43,12 @@ def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, u
     :param col_name:
     :return:
     """
+
+    cached = getattr(get_mongodb, 'cached', {})
+    sig = '%s|%s|%s|%s|%s|%s|%s' % (db_name, col_name, profile, host, port, user, passwd)
+    if sig in cached:
+        return cached[sig]
+
     cfg = dict(load_config())
     if profile and profile in cfg:
         section = cfg[profile]
@@ -57,4 +63,8 @@ def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, u
     db = mongo_conn[db_name]
     if user and passwd:
         db.authenticate(name=user, password=passwd)
-    return db[col_name]
+    col = db[col_name]
+
+    cached[sig] = col
+    setattr(get_mongodb, 'cached', cached)
+    return col

@@ -41,7 +41,7 @@ def reg_processors(proc_dir=None):
                             name = getattr(c, 'name')
                             if name:
                                 conf.global_conf['processors'][name] = c
-                    except TypeError:
+                    except (TypeError, AttributeError):
                         pass
             except ImportError:
                 print 'Import error: %s' % fname
