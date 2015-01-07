@@ -1,38 +1,35 @@
 # coding=utf-8
-import copy
 from hashlib import md5
 import gevent
 import re
 import pymongo
 from mongo import get_mongodb, get_mysql_db
 from gevent.queue import Queue
+from processors import BaseProcessor
 
 __author__ = 'zephyre'
 
 
-class QunarPoiProcessor(object):
+class QunarPoiProcessor(BaseProcessor):
     name = 'qunar-poi'
 
     def __init__(self):
         super(QunarPoiProcessor, self).__init__()
+
         self.args = self.args_builder()
-        self.total = None
         self.conn = None
-        self.progress = 0
-        self.prog_total = 0
+        self.denom = None
 
     @staticmethod
     def args_builder():
         import argparse
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('cmd')
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--cat', required=True, choices=['dining', 'shopping'], type=str)
         parser.add_argument('--query', type=str)
         parser.add_argument('--order', type=str)
-        parser.add_argument('--concur', default=10, type=int)
         args, leftovers = parser.parse_known_args()
         return args
 
@@ -76,7 +73,7 @@ class QunarPoiProcessor(object):
         cursor = self.conn.cursor()
         cursor.execute('SELECT COUNT(*) AS cnt FROM qunar_%s WHERE hotScore<%d' % (
             'meishi' if poi_type == 'dining' else 'gouwu', entry['hotScore']))
-        data['hotness'] = float(cursor.fetchone()['cnt']) / self.total
+        data['hotness'] = float(cursor.fetchone()['cnt']) / self.denom
         data['rating'] = data['hotness']
 
         col_im = get_mongodb('raw_qunar', 'Image', profile='mongo-raw')
@@ -122,12 +119,11 @@ class QunarPoiProcessor(object):
         cur = self.conn.cursor()
 
         cur.execute('SELECT COUNT(*) AS cnt FROM %s' % table)
-        self.total = cur.fetchone()['cnt']
+        self.denom = cur.fetchone()['cnt']
 
         cur.execute(stmt)
-        self.prog_total = cur.rowcount
+        self.total = cur.rowcount
 
-        tasks = Queue()
         for entry in cur:
             def func(val=entry):
                 print 'Upserting %s' % val['name']
@@ -137,23 +133,9 @@ class QunarPoiProcessor(object):
                 col.update({'source.qunar.id': data['source']['qunar']['id']}, {'$set': data}, upsert=True)
                 self.progress += 1
 
-            tasks.put_nowait(func)
+            self.add_task(func)
 
-        def worker():
-            while not tasks.empty():
-                task = tasks.get()
-                task()
-                gevent.sleep(0)
-
-        def timer():
-            while not tasks.empty():
-                print 'Progress: %d / %d' % (self.progress, self.prog_total)
-                gevent.sleep(10)
-
-        jobs = [gevent.spawn(timer)]
-        for i in xrange(self.args.concur):
-            jobs.append(gevent.spawn(worker))
-        gevent.joinall(jobs)
+        super(QunarPoiProcessor, self).run()
 
         t2 = datetime.now()
         print t2
