@@ -3,8 +3,7 @@ import conf
 
 __author__ = 'zephyre'
 
-from gevent import monkey;
-
+from gevent import monkey
 monkey.patch_all()
 import argparse
 
