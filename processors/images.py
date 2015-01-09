@@ -159,12 +159,13 @@ class ImageValidator(BaseProcessor):
 
         col_im = get_mongodb('imagestore', 'Images', profile='mongo')
 
-        cursor = col.find({}, {'images': 1}).sort('_id', pymongo.ASCENDING)
+        cursor = col.find({'images': {'$ne': None}}, {'images': 1}).sort('_id', pymongo.ASCENDING)
         cursor.skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
 
         self.total = 0
+        super(ImageValidator, self).run()
         for entry in cursor:
             def func(val=entry):
                 modified = False
@@ -184,9 +185,9 @@ class ImageValidator(BaseProcessor):
                         print 'Image not exists: %s' % key
                         continue
 
-                    if img['key'] != key:
+                    if img['key'] != new_key:
                         modified = True
-                        img['key'] = key
+                        img['key'] = new_key
 
                     if 'url' in img:
                         modified = True
@@ -199,11 +200,12 @@ class ImageValidator(BaseProcessor):
                             img.pop('cropHint')
 
                 if modified:
+                    print 'Updateing %s' % val['_id']
                     col.update({'_id': val['_id']}, {'$set': {'images': val['images']}})
 
             self.add_task(func)
             gevent.sleep(0)
 
-        super(ImageValidator, self).run()
+        self.join()
 
 
