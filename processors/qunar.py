@@ -29,7 +29,7 @@ class QunarPoiProcessor(BaseProcessor):
         parser = argparse.ArgumentParser()
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
-        parser.add_argument('--cat', required=True, choices=['dining', 'shopping'], type=str)
+        parser.add_argument('--cat', required=True, choices=['dining', 'shopping', 'hotel'], type=str)
         parser.add_argument('--query', type=str)
         parser.add_argument('--order', type=str)
         args, leftovers = parser.parse_known_args()
@@ -67,7 +67,7 @@ class QunarPoiProcessor(BaseProcessor):
             except ValueError:
                 data['priceDesc'] = entry['priceDesc']
 
-        for k1, k2 in [['addr', 'address'], ['openTime'] * 2, ['tel'] * 2, ['style'] * 2]:
+        for k1, k2 in [['addr', 'address'], ['tel'] * 2]:
             if entry[k1]:
                 data[k2] = entry[k1]
 
@@ -95,8 +95,16 @@ class QunarPoiProcessor(BaseProcessor):
         if entry['tag']:
             data['tags'] = filter(lambda val: val, re.split(r'\s+', entry['tag']))
 
-        if entry['special']:
-            data['specials'] = filter(lambda val: val, re.split(r'\s+', entry['special']))
+        if entry['intro']:
+            data['desc'] = entry['intro']
+
+        if poi_type in ['dining', 'shopping']:
+            for k1, k2 in [['style'] * 2, ['openTime'] * 2]:
+                if entry[k1]:
+                    data[k2] = entry[k1]
+
+            if entry['special']:
+                data['specials'] = filter(lambda val: val, re.split(r'\s+', entry['special']))
 
         cursor = self.conn.cursor()
         cursor.execute('SELECT COUNT(*) AS cnt FROM qunar_%s WHERE hotScore<%d' % (
@@ -116,12 +124,7 @@ class QunarPoiProcessor(BaseProcessor):
     def run(self):
         self.conn = get_mysql_db('restore_poi', profile='mysql')
 
-        if self.args.cat == 'dining':
-            table = 'qunar_meishi'
-        elif self.args.cat == 'shopping':
-            table = 'qunar_gouwu'
-        else:
-            assert False, 'Invalid table type: %s' % self.args.cat
+        table = {'dining': 'qunar_meishi', 'shopping': 'qunar_gouwu', 'hotel': 'qunar_jiudian'}[self.args.cat]
 
         stmt_tmpl = 'SELECT * FROM %s' % table
         order = 'ORDER BY %s' % self.args.order if self.args.order else ''
@@ -169,7 +172,7 @@ class QunarPoiProcessor(BaseProcessor):
                     if not data:
                         return
 
-                    col_name = 'Restaurant' if self.args.cat == 'dining' else 'Shopping'
+                    col_name = {'dining': 'Restaurant', 'shopping': 'Shopping', 'hotel': 'Hotel'}[self.args.cat]
                     col = get_mongodb('poi', col_name, profile='mongo')
                     col.update({'source.qunar.id': data['source']['qunar']['id']}, {'$set': data}, upsert=True)
                     self.progress += 1
@@ -238,6 +241,12 @@ class QunarCommentProcessor(BaseProcessor):
                         'publishTime': long(1420727777000), 'type': poi_type, 'contents': val['contents']}
                 if 'rating' in val and val['rating']:
                     data['rating'] = val['rating']
+
+                meta = {}
+                if 'user_name' in val:
+                    meta['userName'] = val['user_name']
+                if meta:
+                    data['meta'] = meta
 
                 print ('Upserting: %s' % val['title']).encode('utf-8')
                 col_cmt.update({'source.qunar.id': cmt_id}, {'$set': data}, upsert=True)
