@@ -1,4 +1,6 @@
+# coding=utf-8
 from Queue import Empty
+import logging
 import traceback
 import signal
 
@@ -8,25 +10,36 @@ import gevent
 
 
 class BaseProcessor(object):
-    def __init__(self):
+    name = 'base-processor'
+
+    def __init__(self, *args, **kwargs):
         from gevent.queue import Queue
 
         self.progress = 0
         self.total = 0
-        self.concur = BaseProcessor.args_builder().concur
         self.maxsize = 1000
         self.op_done = False
         self.tasks = Queue(self.maxsize)
         self.jobs = []
 
-    @staticmethod
-    def args_builder():
-        import argparse
+        from time import time
+        from hashlib import md5
+        # 每个Processor的唯一标识
+        self.processor_name = '%s:%s' % (self.name, md5(str(time())).hexdigest()[:6])
 
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--concur', default=10, type=int)
-        args, leftovers = parser.parse_known_args()
-        return args
+        self._logger = None
+
+        arg_parser = kwargs['arg_parser']
+        arg_parser.add_argument('--concur', default=10, type=int)
+        self.arg_parser = arg_parser
+        ret, leftover = arg_parser.parse_known_args()
+        self.concur = ret.concur
+
+    def log(self, msg, level=logging.INFO):
+        if not self._logger:
+            self._logger = logging.getLogger(self.processor_name)
+
+        self._logger.log(level, msg)
 
     def join(self):
         self.op_done = True
@@ -34,6 +47,11 @@ class BaseProcessor(object):
         gevent.kill(self.jobs[0])
 
     def run(self):
+        import sys
+
+        self.log('Processor started: %s' % ' '.join(sys.argv))
+
+    def start_workers(self):
         def worker():
             while not self.tasks.empty() or not self.op_done:
                 try:

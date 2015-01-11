@@ -15,25 +15,21 @@ __author__ = 'zephyre'
 class QunarPoiProcessor(BaseProcessor):
     name = 'qunar-poi'
 
-    def __init__(self):
-        super(QunarPoiProcessor, self).__init__()
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
 
         self.args = self.args_builder()
         self.conn = None
         self.denom = None
 
-    @staticmethod
-    def args_builder():
-        import argparse
-
-        parser = argparse.ArgumentParser()
+    def args_builder(self):
+        parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--cat', required=True, choices=['dining', 'shopping', 'hotel'], type=str)
         parser.add_argument('--query', type=str)
         parser.add_argument('--order', type=str)
-        args, leftovers = parser.parse_known_args()
-        return args
+        return parser.parse_args()
 
     @staticmethod
     def haversine(lon1, lat1, lon2, lat2):
@@ -122,6 +118,8 @@ class QunarPoiProcessor(BaseProcessor):
         return data
 
     def run(self):
+        BaseProcessor.run(self)
+
         self.conn = get_mysql_db('restore_poi', profile='mysql')
 
         table = {'dining': 'qunar_meishi', 'shopping': 'qunar_gouwu', 'hotel': 'qunar_jiudian'}[self.args.cat]
@@ -146,7 +144,7 @@ class QunarPoiProcessor(BaseProcessor):
         batch_size = 5
         start = offset
 
-        super(QunarPoiProcessor, self).run()
+        self.start_workers()
 
         while True:
             if start > offset + limit:
