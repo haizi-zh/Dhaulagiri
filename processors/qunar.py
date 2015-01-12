@@ -1,12 +1,12 @@
 # coding=utf-8
 from hashlib import md5
 import re
-import gevent
 
+import gevent
 import pymongo
 
-from mongo import get_mongodb, get_mysql_db
-from processors import BaseProcessor
+from utils.database import get_mongodb, get_mysql_db
+from processors import BaseProcessor, runproc
 
 
 __author__ = 'zephyre'
@@ -117,9 +117,8 @@ class QunarPoiProcessor(BaseProcessor):
 
         return data
 
+    @runproc
     def run(self):
-        BaseProcessor.run(self)
-
         self.conn = get_mysql_db('restore_poi', profile='mysql')
 
         table = {'dining': 'qunar_meishi', 'shopping': 'qunar_gouwu', 'hotel': 'qunar_jiudian'}[self.args.cat]
@@ -143,8 +142,6 @@ class QunarPoiProcessor(BaseProcessor):
 
         batch_size = 5
         start = offset
-
-        self.start_workers()
 
         while True:
             if start > offset + limit:
@@ -176,9 +173,6 @@ class QunarPoiProcessor(BaseProcessor):
                     self.progress += 1
 
                 self.add_task(func)
-                gevent.sleep(0)
-
-        self.join()
 
 
 class QunarCommentProcessor(BaseProcessor):
@@ -252,7 +246,7 @@ class QunarCommentProcessor(BaseProcessor):
             self.add_task(func)
             gevent.sleep(0)
 
-        self.join()
+        self._join()
 
 
 class QunarImageProcessor(BaseProcessor):
@@ -328,4 +322,4 @@ class QunarImageProcessor(BaseProcessor):
             self.add_task(func)
             gevent.sleep(0)
 
-        self.join()
+        self._join()

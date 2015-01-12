@@ -1,5 +1,6 @@
-from processors import BaseProcessor
-from mongo import get_mongodb
+import gevent
+from processors import BaseProcessor, runproc
+from utils.database import get_mongodb
 
 __author__ = 'zephyre'
 
@@ -18,9 +19,8 @@ class BaiduPoiProcessor(BaseProcessor):
         parser.add_argument('--skip', default=0, type=int)
         return parser.parse_args()
 
+    @runproc
     def run(self):
-        BaseProcessor.run(self)
-
         col = get_mongodb('poi', 'ViewSpot', profile='mongo')
         col_raw = get_mongodb('raw_baidu', 'BaiduPoi', profile='mongo-raw')
 
@@ -30,12 +30,15 @@ class BaiduPoiProcessor(BaseProcessor):
             cursor.limit(self.args.limit)
 
         for entry in cursor:
-            tips = []
-            for item in entry['tips']:
-                title = item['title']
-                desc = '<div>%s</div>' % item['contents']
-                tips.append({'title': title, 'desc': desc})
+            def func(val=entry):
+                tips = []
+                for item in val['tips']:
+                    title = item['title']
+                    desc = '<div>%s</div>' % item['contents']
+                    tips.append({'title': title, 'desc': desc})
 
-            self.log('Updating: sid: %s, sname: %s...' % (entry['sid'], entry['sname']))
-            col.update({'source.baidu.id': entry['sid']}, {'$set': {'tips': tips}})
+                self.log('Updating: sid: %s, sname: %s...' % (val['sid'], val['sname']))
+                col.update({'source.baidu.id': val['sid']}, {'$set': {'tips': tips}})
+
+            self.add_task(func)
 

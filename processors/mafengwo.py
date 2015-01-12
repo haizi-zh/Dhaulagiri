@@ -1,10 +1,12 @@
 # coding=utf-8
 
 import argparse
-import gevent
 import re
 
-from mongo import get_mongodb
+import gevent
+from processors import BaseProcessor
+
+from utils.database import get_mongodb
 
 
 __author__ = 'zephyre'
@@ -39,17 +41,15 @@ class MfwImageExtractor(object):
                 return ret
 
 
-class PoiCommentProcessor(MfwImageExtractor):
+class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
     name = 'mfw-poi-comment'
 
-    def __init__(self):
-        super(PoiCommentProcessor, self).__init__()
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
         self.args = self.args_builder()
 
-    @staticmethod
-    def args_builder():
-        parser = argparse.ArgumentParser()
-        parser.add_argument('cmd')
+    def args_builder(self):
+        parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         return parser.parse_args()
