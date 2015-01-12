@@ -1,4 +1,5 @@
 # coding=utf-8
+import types
 import conf
 
 __author__ = 'zephyre'
@@ -37,10 +38,14 @@ def reg_processors(proc_dir=None):
                 for attr_name in dir(mod):
                     try:
                         c = getattr(mod, attr_name)
-                        if issubclass(c, object):
-                            name = getattr(c, 'name')
-                            if name:
-                                conf.global_conf['processors'][name] = c
+                        base_cls = getattr(c, 'base_cls', None)
+                        target_cls = base_cls if base_cls else c
+                        name = getattr(target_cls, 'name')
+                        func = getattr(target_cls, 'run')
+                        if isinstance(name, str) and isinstance(func, types.MethodType):
+                            conf.global_conf['processors'][name] = c
+                        else:
+                            continue
                     except (TypeError, AttributeError):
                         pass
             except ImportError:
@@ -59,6 +64,8 @@ def main():
         parser_cls = conf.global_conf['processors'][args.cmd]
         proc = parser_cls(arg_parser=parser)
         proc.run()
+    else:
+        print 'No processor found for: %s' % args.cmd
 
 
 if __name__ == '__main__':

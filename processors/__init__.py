@@ -2,6 +2,8 @@
 from Queue import Empty
 import logging
 import signal
+from lxml.sax import ElementTreeContentHandler
+
 
 __author__ = 'zephyre'
 
@@ -23,10 +25,6 @@ def runproc(func):
 
 class BaseProcessor(object):
     name = 'base-processor'
-
-    @classmethod
-    def func(cls, arg):
-        pass
 
     def __init__(self, *args, **kwargs):
         from gevent.queue import Queue
@@ -57,6 +55,7 @@ class BaseProcessor(object):
         # Checkpoints for progress
         self.checkpoint_ts = None
         self.checkpoint_prog = None
+        self.init_ts = time()
 
     def _get_logger(self):
         if self._logger:
@@ -76,7 +75,7 @@ class BaseProcessor(object):
             if self.args.logpath:
                 log_path = os.path.abspath(self.args.logpath)
             else:
-                log_path = os.path.abspath(os.path.join(os.path.split(__file__)[0], 'log'))
+                log_path = os.path.abspath(os.path.join(os.path.split(__file__)[0], '../log'))
             log_file = os.path.normpath(os.path.join(log_path, '%s.log' % self.name))
             handler = TimedRotatingFileHandler(log_file, when='d', encoding='utf-8')
 
@@ -113,7 +112,7 @@ class BaseProcessor(object):
                 try:
                     task()
                 except Exception as e:
-                    self.logger().error('Error occured!', exc_info=True)
+                    self.logger.error('Error occured!', exc_info=True)
 
                 gevent.sleep(0)
 
@@ -124,15 +123,16 @@ class BaseProcessor(object):
                 msg = 'Progress: %d / %d.' % (self.progress, self.total)
 
                 cts = time.time()
+
                 if self.checkpoint_prog is not None and self.checkpoint_ts is not None:
                     rate = (self.progress - self.checkpoint_prog) / (cts - self.checkpoint_ts) * 60
                     msg = '%s %s' % (msg, 'Processing rate: %d items/min' % int(rate))
 
-                self.checkpoint_ts = time.time()
+                self.checkpoint_ts = cts
                 self.checkpoint_prog = self.progress
 
                 self.log(msg)
-                gevent.sleep(5)
+                gevent.sleep(30)
 
         gevent.signal(signal.SIGKILL, gevent.kill)
         gevent.signal(signal.SIGQUIT, gevent.kill)
@@ -146,5 +146,23 @@ class BaseProcessor(object):
             self.progress += 1
             task()
 
-        self.tasks.put(wrapper, timeout=60)
+        self.tasks.put(wrapper, timeout=30)
         gevent.sleep(0)
+
+    def run(self):
+        import sys
+        import time
+
+        self.log('Processor started: %s' % ' '.join(sys.argv))
+
+        self._start_workers()
+
+        self.populate_tasks()
+
+        self._join()
+
+        self.log('Processor ended. %d items processed in %d minutes' % (self.progress,
+                                                                        int((time.time() - self.init_ts) / 60.0)))
+
+    def populate_tasks(self):
+        raise NotImplementedError
