@@ -2,15 +2,20 @@
 
 import json
 import logging
+from lxml import etree
 import re
+from datetime import timedelta
+from datetime import datetime
+from lxml.sax import ElementTreeContentHandler
+from hashlib import md5
 
 import gevent
-from lxml.sax import ElementTreeContentHandler
-from processors import BaseProcessor, runproc
-from utils import haversine
+from scrapy import Selector
 
+from processors import BaseProcessor, runproc
+from processors.youji_mixin import MfwDomTreeProc
+from utils import haversine
 from utils.database import get_mongodb
-from hashlib import md5
 from utils.mixin import baidu_suggestion
 
 
@@ -28,6 +33,8 @@ class MfwImageExtractor(object):
             return {'id': image_id, 'metadata': {}, 'src': src, 'url': url, 'key': key, 'url_hash': key}
 
         def f1(src):
+            if not src:
+                return None
             pattern = r'([^\./]+)\.\w+\.[\w\d]+\.(jpeg|bmp|png)$'
             match = re.search(pattern, src)
             if not match:
@@ -46,7 +53,7 @@ class MfwImageExtractor(object):
                 return ret
 
 
-class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
+class PoiCommentProcessor(BaseProcessor, MfwDomTreeProc):
     name = 'mfw-poi-comment'
 
     def __init__(self, *args, **kwargs):
@@ -553,3 +560,121 @@ class MafengwoProcessor(BaseProcessor):
                                     upsert=True)
 
             self.add_task(func)
+
+
+class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
+    name = 'mfw_note_proc'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        MfwDomTreeProc.__init__(self)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=0, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=int)
+        return parser.parse_args()
+
+    def parse_content(self, entry):
+        ret_list = []
+        data = {}
+        nid = entry['note_id']
+        data['source.mafengwo.id'] = nid
+        data['authorName'] = entry['author_name'] if 'author_name' in entry else None
+        data['title'] = entry['title'] if 'title' in entry else None
+        author_avatar = entry['author_avatar'] if 'author_avatar' in entry else None
+        if not author_avatar:
+            author_avatar = entry['user_avatar'] if 'user_avatar' in entry else None
+            ret = self.retrieve_image(author_avatar)
+            if ret:
+                data['authorAvatar'] = ret['key']
+                ret_list.append(ret)
+            else:
+                data['authorAvatar'] = None
+        data['viewCnt'] = int(entry['view_cnt']) if 'view_cnt' in entry else None
+        data['voteCnt'] = int(entry['vote_cnt']) if 'vote_cnt' in entry else None
+        data['commentCnt'] = int(entry['comment_cnt']) if 'comment_cnt' in entry else None
+        data['shareCnt'] = entry['share_cnt'] if 'share_cnt' in entry else None
+        data['authorId'] = entry['author_id'] if 'author_id' in entry else None
+        data['favorCnt'] = entry['favor_cnt'] if 'favor_cnt' in entry else None
+        cover = entry['cover'] if 'cover' in entry else None
+        if cover:
+            ret = self.retrieve_image(cover)
+            if ret:
+                data['cover'] = ret['key']
+                ret_list.append(ret)
+            else:
+                data['cover'] = None
+        note_content = entry['contents'] if 'contents' in entry else None
+        contents = []
+        publish_time = None
+        if note_content:
+            tmp = {}
+            sel = Selector(text=note_content)
+            # 发表时间
+            publish_time = sel.xpath(
+                '//div[@class="post_item"]//span[@class="date"]/text()').extract()
+            if publish_time:
+                publish_time = publish_time[0]
+                publish_time = long(
+                    (datetime.strptime(publish_time, '%Y-%m-%d %H:%M:%S') - timedelta(seconds=8 * 3600)
+                     - datetime.utcfromtimestamp(0)).total_seconds() * 1000)
+            note_content = sel.xpath(
+                '//div[@class="post_item"]//div[@id="pnl_contentinfo"]').extract()
+            if note_content:
+                note_content = note_content[0]
+                # 去除内部所有的链接
+                tmp['title'] = ''
+                root = etree.HTML(note_content)
+                content_root = root.xpath('//div[@id="pnl_contentinfo"]')
+                tmp_root = content_root[0]
+                for i in range(0, len(tmp_root)):
+                    if 'class' in tmp_root[i].attrib.keys() and tmp_root[i].attrib['class'] == 'summary':
+                        parent = tmp_root[i].getparent()
+                        for j in range(0, len(parent)):
+                            if parent[j].tag == 'div' and parent[j].attrib['class'] == 'summary':
+                                del parent[j]
+                                break
+                        break
+                try:
+                    result = self.walk_tree(tmp_root, ret_list)
+                    proc_root = result['root']
+                    ret_list = result['ret_list']
+                    tmp['content'] = etree.tostring(proc_root, encoding='utf-8').decode('utf-8')
+                except TypeError, e:
+                    tmp['content'] = entry['contents']
+                    self.log.msg(e.message)
+                    self.log.msg('nid:%s' % nid)
+                contents.append(tmp)
+        data['publishTime'] = publish_time
+        data['contents'] = contents
+
+        ret_list = filter(lambda val: val, ret_list)
+
+        return {'data': data, 'ret_list': ret_list}
+
+
+    def populate_tasks(self):
+        col_raw_mfw_note = get_mongodb('raw_mfw', 'MafengwoNote', 'mongo-raw')
+        col_image = get_mongodb('imagestore', 'ImageCandidates', 'mongodb-general')
+        col_mfw_note = get_mongodb('travelnote', 'MafengwoNote', 'mongodb-general')
+        cursor = col_raw_mfw_note.find({'main_post': True})
+        for entry in cursor:
+            def func(val=entry):
+                result = self.parse_content(val)
+                data = result['data']
+                col_mfw_note.update({'source.mafengwo.id': data['source.mafengwo.id']}, {'$set': data},
+                                    upsert=True)
+                ret_list = result['ret_list']
+                if ret_list:
+                    for tmp in ret_list:
+                        image_data = self.image_proc(tmp)
+                        if image_data:
+                            col_image.update({'key': image_data['key']}, {'$set': image_data}, upsert=True)
+
+            self.add_task(func)
+
+
+

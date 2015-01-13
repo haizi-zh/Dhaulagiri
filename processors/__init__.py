@@ -2,7 +2,6 @@
 from Queue import Empty
 import logging
 import signal
-from lxml.sax import ElementTreeContentHandler
 
 
 __author__ = 'zephyre'
