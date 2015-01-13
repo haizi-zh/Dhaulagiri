@@ -1,9 +1,11 @@
 # coding=utf-8
+import types
 import conf
 
 __author__ = 'zephyre'
 
 from gevent import monkey
+
 monkey.patch_all()
 import argparse
 
@@ -36,10 +38,14 @@ def reg_processors(proc_dir=None):
                 for attr_name in dir(mod):
                     try:
                         c = getattr(mod, attr_name)
-                        if issubclass(c, object):
-                            name = getattr(c, 'name')
-                            if name:
-                                conf.global_conf['processors'][name] = c
+                        base_cls = getattr(c, 'base_cls', None)
+                        target_cls = base_cls if base_cls else c
+                        name = getattr(target_cls, 'name')
+                        func = getattr(target_cls, 'run')
+                        if isinstance(name, str) and isinstance(func, types.MethodType):
+                            conf.global_conf['processors'][name] = c
+                        else:
+                            continue
                     except (TypeError, AttributeError):
                         pass
             except ImportError:
@@ -47,59 +53,19 @@ def reg_processors(proc_dir=None):
                 raise
 
 
-def load_processor(cls, args, arg_parser):
-    """
-    初始化一个processor
-
-    :param cls: processor的类
-    :param args: ArgumentParser生成的命令行参数
-    :return:
-    """
-    processor = cls(arg_parser=arg_parser)
-
-    import os
-    import logging
-    from logging.handlers import TimedRotatingFileHandler
-    from logging import StreamHandler, Formatter
-
-    # Set up a specific logger with our desired output level
-    logger = logging.getLogger(processor.processor_name)
-
-    if args.verbose:
-        handler = StreamHandler()
-    else:
-        if args.logpath:
-            log_path = os.path.abspath(args.logpath)
-        else:
-            log_path = os.path.abspath(os.path.join(os.path.split(__file__)[0], 'log'))
-        log_file = os.path.normpath(os.path.join(log_path, '%s.log' % processor.name))
-        handler = TimedRotatingFileHandler(log_file, when='d', encoding='utf-8')
-
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    handler.setLevel(log_level)
-
-    formatter = Formatter(fmt='%(asctime)s [%(name)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S%z')
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-    logger.setLevel(log_level)
-
-    return processor
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('cmd')
-    parser.add_argument('--debug', action='store_true', default=False)
-    parser.add_argument('--verbose', action='store_true', default=False)
-    parser.add_argument('--logpath', type=str)
     args, leftovers = parser.parse_known_args()
 
     reg_processors()
 
     if args.cmd in conf.global_conf['processors']:
-        proc = load_processor(conf.global_conf['processors'][args.cmd], args, parser)
+        parser_cls = conf.global_conf['processors'][args.cmd]
+        proc = parser_cls(arg_parser=parser)
         proc.run()
+    else:
+        print 'No processor found for: %s' % args.cmd
 
 
 if __name__ == '__main__':

@@ -2,10 +2,13 @@
 import argparse
 import re
 from hashlib import md5
+
 import gevent
 import pymongo
 from pymongo.errors import DuplicateKeyError
+
 from processors import BaseProcessor
+
 
 __author__ = 'zephyre'
 
@@ -34,7 +37,7 @@ class ImageTransfer(BaseProcessor):
     def bucket_mgr():
         from qiniu import Auth
         from qiniu import BucketManager
-        from mongo import load_config
+        from utils import load_config
 
         conf = load_config()['qiniu']
 
@@ -48,7 +51,7 @@ class ImageTransfer(BaseProcessor):
         """
         将图像添加到ImageCandidates里面
         """
-        from mongo import get_mongodb
+        from utils.database import get_mongodb
 
         col_cand = get_mongodb('imagestore', 'ImageCandidates', profile='mongo')
         col_img = get_mongodb('imagestore', 'Images', profile='mongo')
@@ -63,7 +66,7 @@ class ImageTransfer(BaseProcessor):
         col_img.remove({'_id': image_id})
 
     def run(self):
-        from mongo import get_mongodb
+        from utils.database import get_mongodb
 
         col = get_mongodb('imagestore', 'Images', profile='mongo')
 
@@ -122,7 +125,7 @@ class ImageTransfer(BaseProcessor):
             self.add_task(func)
             gevent.sleep(0)
 
-        self.join()
+        self._join()
 
 
 class ImageValidator(BaseProcessor):
@@ -148,7 +151,7 @@ class ImageValidator(BaseProcessor):
         return args
 
     def run(self):
-        from mongo import get_mongodb
+        from utils.database import get_mongodb
 
         col = get_mongodb(self.args.db, self.args.col, profile='mongo')
 
@@ -206,6 +209,6 @@ class ImageValidator(BaseProcessor):
             self.add_task(func)
             gevent.sleep(0)
 
-        self.join()
+        self._join()
 
 
