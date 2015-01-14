@@ -7,7 +7,6 @@ import re
 from datetime import timedelta
 from datetime import datetime
 from lxml.sax import ElementTreeContentHandler
-from hashlib import md5
 
 import gevent
 import pysolr
@@ -16,9 +15,10 @@ from scrapy import Selector
 from processors import BaseProcessor, runproc
 from processors.youji_mixin import MfwDomTreeProc
 from utils import haversine
-from utils.database import get_mongodb, get_solr
-from utils.mixin import baidu_suggestion
 
+from utils.database import get_mongodb, get_solr
+from hashlib import md5
+from utils.mixin import BaiduSuggestion
 
 __author__ = 'zephyre'
 
@@ -198,8 +198,7 @@ class MfwHtmlHandler(ElementTreeContentHandler):
         ElementTreeContentHandler.startElementNS(self, ns_name, qname, attributes)
 
 
-@baidu_suggestion
-class MafengwoProcessor(BaseProcessor):
+class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
     """
     马蜂窝目的地的清洗
 
@@ -553,9 +552,8 @@ class MafengwoProcessor(BaseProcessor):
                     if 'baidu' not in data['source']:
                         self.log('Not matched: %s' % data['zhName'])
 
-                processor.log(
-                    'Parsing done: %s / %s / %s' % tuple(
-                        data[key] if key in data else None for key in ['zhName', 'enName', 'locName']))
+                self.log('Parsing done: %s / %s / %s' % tuple(data[key] if key in data else None for key in
+                                                              ['zhName', 'enName', 'locName']))
 
                 col_proc_mdd.update({'source.mafengwo.id': data['source']['mafengwo']['id']}, {'$set': data},
                                     upsert=True)

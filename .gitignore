@@ -57,7 +57,5 @@ target/
 
 
 .idea
-qiniu.cfg
-mongo.cfg
-commons.cfg
-mysql.cfg
+*.cfg
+*.yaml
