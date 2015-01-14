@@ -519,7 +519,8 @@ class MafengwoProcessor(BaseProcessor):
 
                 # 获得对应的图像
                 sig = 'MafengwoMdd-%d' % data['source']['mafengwo']['id']
-                image_list = [{'key': md5(tmp['url']).hexdigest()} for tmp in col_raw_im.find({'itemIds': sig})]
+                image_list = [{'key': md5(tmp['url']).hexdigest()} for tmp in
+                              col_raw_im.find({'itemIds': sig}).limit(10)]
                 if image_list:
                     data['images'] = image_list
 
