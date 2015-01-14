@@ -186,17 +186,11 @@ class ImageUploader(BaseProcessor):
             self.fetch_stat(entry)
             self.fetch_info(entry)
 
-            col_im.update({'url_hash': entry['url_hash']}, {'$set': entry})
+            col_im.update({'url_hash': entry['url_hash']}, {'$set': entry}, upsert=True)
             col_cand.remove({'_id': entry['_id']})
 
         except IOError:
-            if 'failCnt' not in entry:
-                entry['failCnt'] = 0
-            entry['failCnt'] += 1
-            if entry['failCnt'] > 5:
-                col_cand.remove({'_id': entry['_id']})
-            else:
-                col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
+            self.on_failure(entry)
             return
 
     def populate_tasks(self):
