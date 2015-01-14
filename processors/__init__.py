@@ -146,7 +146,7 @@ class BaseProcessor(object):
             self.progress += 1
             task()
 
-        self.tasks.put(wrapper, timeout=30)
+        self.tasks.put(wrapper)
         gevent.sleep(0)
 
     def run(self):
