@@ -29,7 +29,7 @@ def get_mongodb(db_name, col_name, profile):
         from pymongo import MongoReplicaSetClient
         from pymongo import ReadPreference
 
-        client = MongoReplicaSetClient('%s:%d' % (host, port), section['replName'])
+        client = MongoReplicaSetClient('%s:%d' % (host, port), replicaSet=section['replName'])
 
         pref = section.get('readPref', 'PRIMARY')
         client.read_preference = getattr(ReadPreference, pref)
