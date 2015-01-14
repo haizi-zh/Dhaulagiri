@@ -2,6 +2,43 @@
 __author__ = 'zephyre'
 
 
+def load_yaml():
+    """
+    Load YAML-format configuration files
+    :return:
+    """
+
+    config = getattr(load_yaml, 'config', None)
+    if config:
+        return config
+
+    from yaml import load
+    import os
+    from glob import glob
+
+    cfg_dir = os.path.abspath(os.path.join(os.path.split(__file__)[0], '../conf/'))
+    cfg_file = os.path.join(cfg_dir, 'dhaulagiri.yaml')
+    with open(cfg_file) as f:
+        config = load(f)
+
+    # Resolve includes
+    if 'include' in config:
+        for entry in config['include']:
+            for fname in glob(os.path.join(cfg_dir, entry)):
+                if fname == cfg_file:
+                    continue
+                try:
+                    with open(fname) as f:
+                        include_data = load(f)
+                        for k, v in include_data.items():
+                            config[k] = v
+                except IOError:
+                    continue
+
+    setattr(load_yaml, 'config', config)
+    return config
+
+
 def load_config():
     """
     Load configuration files from ./conf/*.cfg

@@ -1,6 +1,5 @@
 # coding=utf-8
 import argparse
-import json
 import logging
 import re
 from hashlib import md5
@@ -66,9 +65,9 @@ class ImageUploader(BaseProcessor):
         :param bucket:
         """
         from qiniu import Auth
-        from utils import load_config
+        from utils import load_yaml
 
-        cfg = dict(load_config())
+        cfg = load_yaml()
 
         # 获得上传权限
         section = cfg['qiniu']
@@ -244,9 +243,9 @@ class ImageTransfer(BaseProcessor):
     def bucket_mgr():
         from qiniu import Auth
         from qiniu import BucketManager
-        from utils import load_config
+        from utils import load_yaml
 
-        conf = load_config()['qiniu']
+        conf = load_yaml()['qiniu']
 
         access_key = conf['ak']
         secret_key = conf['sk']
