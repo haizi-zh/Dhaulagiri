@@ -11,8 +11,7 @@ from utils import haversine
 
 from utils.database import get_mongodb
 from hashlib import md5
-from utils.mixin import baidu_suggestion
-
+from utils.mixin import BaiduSuggestion
 
 __author__ = 'zephyre'
 
@@ -190,8 +189,7 @@ class MfwHtmlHandler(ElementTreeContentHandler):
         ElementTreeContentHandler.startElementNS(self, ns_name, qname, attributes)
 
 
-@baidu_suggestion
-class MafengwoProcessor(BaseProcessor):
+class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
     """
     马蜂窝目的地的清洗
 
@@ -545,9 +543,8 @@ class MafengwoProcessor(BaseProcessor):
                     if 'baidu' not in data['source']:
                         self.log('Not matched: %s' % data['zhName'])
 
-                processor.log(
-                    'Parsing done: %s / %s / %s' % tuple(
-                        data[key] if key in data else None for key in ['zhName', 'enName', 'locName']))
+                self.log('Parsing done: %s / %s / %s' % tuple(data[key] if key in data else None for key in
+                                                              ['zhName', 'enName', 'locName']))
 
                 col_proc_mdd.update({'source.mafengwo.id': data['source']['mafengwo']['id']}, {'$set': data},
                                     upsert=True)
