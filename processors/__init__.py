@@ -114,7 +114,10 @@ class BaseProcessor(object):
                 try:
                     task()
                 except Exception as e:
-                    self.logger.error('Error occured!', exc_info=True)
+                    if e.message:
+                        self.logger.error('Error occured: %s' % e.message, exc_info=True)
+                    else:
+                        self.logger.error('Error occured: unknown', exc_info=True)
 
                 gevent.sleep(0)
 
