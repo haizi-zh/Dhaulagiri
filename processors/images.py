@@ -33,6 +33,7 @@ class ImageUploader(BaseProcessor):
         parser = self.arg_parser
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--url-filter', type=str)
         return parser.parse_args()
 
     @staticmethod
@@ -203,6 +204,14 @@ class ImageUploader(BaseProcessor):
 
         for val in cursor:
             def task(entry=val):
+
+                if self.args.url_filter:
+                    pattern = self.args.url_filter
+                    if not re.match(pattern, entry['url']):
+                        self.log('Skipped image: %s' % entry['url'])
+                        return
+
+                self.log('Processing image: %s' % entry['url'])
                 self.proc_image(entry)
 
             self.add_task(task)
