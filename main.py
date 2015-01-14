@@ -1,6 +1,7 @@
 # coding=utf-8
 import types
 import conf
+from utils import load_yaml
 
 __author__ = 'zephyre'
 
@@ -55,6 +56,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('cmd')
     args, leftovers = parser.parse_known_args()
+
+    load_yaml()
 
     reg_processors()
 
