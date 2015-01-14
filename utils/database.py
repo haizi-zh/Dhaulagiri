@@ -1,4 +1,5 @@
 # coding=utf-8
+import pysolr
 from utils import load_config
 
 __author__ = 'zephyre'
@@ -70,3 +71,14 @@ def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost'
 
     return MySQLdb.connect(host=host, port=port, user=user, passwd=passwd, db=db_name, cursorclass=DictCursor,
                            charset='utf8')
+
+
+def get_solr(profile):
+    cfg = dict(load_config())
+    section = cfg[profile]
+    host = section.get('host')
+    port = section.get('port')
+    # solr配置
+    solr_s = pysolr.Solr('http://%s:%s/solr/travelnote' % (host, port))
+
+    return solr_s

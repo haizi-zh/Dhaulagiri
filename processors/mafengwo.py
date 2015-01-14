@@ -10,12 +10,13 @@ from lxml.sax import ElementTreeContentHandler
 from hashlib import md5
 
 import gevent
+import pysolr
 from scrapy import Selector
 
 from processors import BaseProcessor, runproc
 from processors.youji_mixin import MfwDomTreeProc
 from utils import haversine
-from utils.database import get_mongodb
+from utils.database import get_mongodb, get_solr
 from utils.mixin import baidu_suggestion
 
 
@@ -314,8 +315,8 @@ class MafengwoProcessor(BaseProcessor):
     def resolve_targets(item):
         data = item['data']
 
-        col_mdd = get_mongodb('geo', 'Locality', 'mongodb-general')
-        col_country = get_mongodb('geo', 'Country', 'mongodb-general')
+        col_mdd = get_mongodb('geo', 'Locality', 'mongo')
+        col_country = get_mongodb('geo', 'Country', 'mongo')
 
         country_flag = False
         crumb_list = data.pop('crumbIds')
@@ -645,8 +646,8 @@ class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
                     tmp['content'] = etree.tostring(proc_root, encoding='utf-8').decode('utf-8')
                 except TypeError, e:
                     tmp['content'] = entry['contents']
-                    self.log.msg(e.message)
-                    self.log.msg('nid:%s' % nid)
+                    self.log(e.message)
+                    self.log('nid:%s' % nid)
                 contents.append(tmp)
         data['publishTime'] = publish_time
         data['contents'] = contents
@@ -658,8 +659,8 @@ class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
 
     def populate_tasks(self):
         col_raw_mfw_note = get_mongodb('raw_mfw', 'MafengwoNote', 'mongo-raw')
-        col_image = get_mongodb('imagestore', 'ImageCandidates', 'mongodb-general')
-        col_mfw_note = get_mongodb('travelnote', 'MafengwoNote', 'mongodb-general')
+        col_image = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        col_mfw_note = get_mongodb('travelnote', 'MafengwoNote', 'mongo')
         cursor = col_raw_mfw_note.find({'main_post': True})
         for entry in cursor:
             def func(val=entry):
@@ -675,6 +676,83 @@ class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
                             col_image.update({'key': image_data['key']}, {'$set': image_data}, upsert=True)
 
             self.add_task(func)
+
+
+class NoteSolr(BaseProcessor):
+    name = 'note_solr'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=0, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
+        return parser.parse_args()
+
+    def get_data(self, item):
+        note_id = item['source'][self.args.query]['id']
+        data = {'id': str(item['_id']),
+                'title': item['title'],
+                'note_id': note_id
+        }
+        contents = item['contents']
+        content_list = []
+        for node in contents:
+            cnt_text_list = filter(lambda val: val, etree.fromstring(node['content']).xpath('//text()'))
+            if not cnt_text_list:
+                continue
+            cnt_text = ','.join(cnt_text_list)
+            if node['title']:
+                tmp_ful_text = node['title'], '%s' % cnt_text
+            else:
+                tmp_ful_text = cnt_text
+            content_list.extend(tmp_ful_text)
+        data['contents'] = '\n'.join(content_list)
+        if data['contents']:
+            return data
+        else:
+            return None
+
+
+    def populate_tasks(self):
+        query = self.args.query
+        if query == 'baidu':
+            col_name = 'BaiduNoteMain'
+        elif query == 'mfw':
+            col_name = 'MafengwoNote'
+        col = get_mongodb('travelnote', col_name, 'mongo')
+        cursor = col.find()
+        solr_s = get_solr('solr')
+        for item in cursor:
+            if item['contents']:
+                def func(entry=item):
+                    data = self.get_data(entry)
+                    if data:
+                        doc = [{
+                                   'id': data['id'],
+                                   'note_id': data['note_id'],
+                                   'title': data['title'],
+                                   'contents': data['contents']
+                               }]
+                        try:
+                            solr_s.add(doc)
+                        except pysolr.SolrError, e:
+                            self.log('error:%s,id:%s' % (e.message, data['id']))
+                            pass
+                    else:
+                        pass
+
+                self.add_task(func)
+            else:
+                continue
+
+
+
+
+
 
 
 

@@ -11,8 +11,8 @@ class TravelNoteMixin(object):
     def image_proc(self, ret):
         # 检查是否已经存在于数据库中
         data = {}
-        col_im = get_mongodb('imagestore', 'Images', 'mongodb-general')
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongodb-general')
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         img = col_im.find_one({'url_hash': ret['url_hash']}, {'_id': 1})
         if not img:
             img = col_cand.find_one({'url_hash': ret['url_hash']}, {'_id': 1})
