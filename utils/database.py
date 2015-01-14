@@ -1,10 +1,10 @@
 # coding=utf-8
-from utils import load_config
+from utils import load_yaml
 
 __author__ = 'zephyre'
 
 
-def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, user=None, passwd=None):
+def get_mongodb(db_name, col_name, profile):
     """
     建立MongoDB的连接。
     :param host:
@@ -15,29 +15,41 @@ def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, u
     """
 
     cached = getattr(get_mongodb, 'cached', {})
-    sig = '%s|%s|%s|%s|%s|%s|%s' % (db_name, col_name, profile, host, port, user, passwd)
-    if sig in cached:
-        return cached[sig]
 
-    cfg = dict(load_config())
-    if profile and profile in cfg:
-        section = cfg[profile]
-        host = section.get('host', 'localhost')
-        port = int(section.get('port', '27017'))
+    if profile in cached:
+        return cached[profile][db_name][col_name]
+
+    cfg = load_yaml()
+    section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
+
+    host = section.get('host', 'localhost')
+    port = int(section.get('port', '27017'))
+
+    if section.get('replica', False):
+        from pymongo import MongoReplicaSetClient
+        from pymongo import ReadPreference
+
+        client = MongoReplicaSetClient('%s:%d' % (host, port), replicaSet=section['replName'])
+
+        pref = section.get('readPref', 'PRIMARY')
+        client.read_preference = getattr(ReadPreference, pref)
+
+    else:
+        from pymongo import MongoClient
+
+        client = MongoClient(host, port)
+
+    cached[profile] = client
+    setattr(get_mongodb, 'cached', cached)
+
+    db = client[db_name]
+
+    if section.get('auth', False):
         user = section.get('user', None)
         passwd = section.get('passwd', None)
-
-    from pymongo import MongoClient
-
-    mongo_conn = MongoClient(host, port)
-    db = mongo_conn[db_name]
-    if user and passwd:
         db.authenticate(name=user, password=passwd)
-    col = db[col_name]
 
-    cached[sig] = col
-    setattr(get_mongodb, 'cached', cached)
-    return col
+    return db[col_name]
 
 
 def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost', port=3306):
@@ -57,7 +69,7 @@ def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost'
     if sig in cached:
         return cached[sig]
 
-    cfg = dict(load_config())
+    cfg = load_yaml()
     if profile and profile in cfg:
         section = cfg[profile]
         host = section.get('host', 'localhost')

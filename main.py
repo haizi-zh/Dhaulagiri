@@ -1,6 +1,7 @@
 # coding=utf-8
 import types
 import conf
+from utils import load_yaml
 
 __author__ = 'zephyre'
 
@@ -37,13 +38,11 @@ def reg_processors(proc_dir=None):
 
                 for attr_name in dir(mod):
                     try:
-                        c = getattr(mod, attr_name)
-                        base_cls = getattr(c, 'base_cls', None)
-                        target_cls = base_cls if base_cls else c
+                        target_cls = getattr(mod, attr_name)
                         name = getattr(target_cls, 'name')
                         func = getattr(target_cls, 'run')
                         if isinstance(name, str) and isinstance(func, types.MethodType):
-                            conf.global_conf['processors'][name] = c
+                            conf.global_conf['processors'][name] = target_cls
                         else:
                             continue
                     except (TypeError, AttributeError):
@@ -57,6 +56,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('cmd')
     args, leftovers = parser.parse_known_args()
+
+    load_yaml()
 
     reg_processors()
 

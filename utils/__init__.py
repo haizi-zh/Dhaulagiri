@@ -2,6 +2,43 @@
 __author__ = 'zephyre'
 
 
+def load_yaml():
+    """
+    Load YAML-format configuration files
+    :return:
+    """
+
+    config = getattr(load_yaml, 'config', None)
+    if config:
+        return config
+
+    from yaml import load
+    import os
+    from glob import glob
+
+    cfg_dir = os.path.abspath(os.path.join(os.path.split(__file__)[0], '../conf/'))
+    cfg_file = os.path.join(cfg_dir, 'dhaulagiri.yaml')
+    with open(cfg_file) as f:
+        config = load(f)
+
+    # Resolve includes
+    if 'include' in config:
+        for entry in config['include']:
+            for fname in glob(os.path.join(cfg_dir, entry)):
+                if fname == cfg_file:
+                    continue
+                try:
+                    with open(fname) as f:
+                        include_data = load(f)
+                        for k, v in include_data.items():
+                            config[k] = v
+                except IOError:
+                    continue
+
+    setattr(load_yaml, 'config', config)
+    return config
+
+
 def load_config():
     """
     Load configuration files from ./conf/*.cfg
@@ -47,6 +84,25 @@ def mercator2wgs(mx, my):
     y = my / 20037508.34 * 180
     y = 180 / pi * (2 * atan(exp(y * pi / 180)) - pi / 2)
     return x, y
+
+
+def guess_coords(x, y):
+    # 可能是墨卡托
+    if abs(x) > 180 or abs(y) > 180:
+        rx, ry = mercator2wgs(x, y)
+    else:
+        rx, ry = x, y
+
+    if abs(x) < 0.1 and abs(y) < 0.1:
+        # 不考虑在原点的情况
+        return
+
+    if abs(ry) >= 90:
+        rx, ry = ry, rx
+    if abs(ry) >= 90:
+        return
+
+    return rx, ry
 
 
 def haversine(lon1, lat1, lon2, lat2):
