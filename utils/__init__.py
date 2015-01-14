@@ -49,6 +49,25 @@ def mercator2wgs(mx, my):
     return x, y
 
 
+def guess_coords(x, y):
+    # 可能是墨卡托
+    if abs(x) > 180 or abs(y) > 180:
+        rx, ry = mercator2wgs(x, y)
+    else:
+        rx, ry = x, y
+
+    if abs(x) < 0.1 and abs(y) < 0.1:
+        # 不考虑在原点的情况
+        return
+
+    if abs(ry) >= 90:
+        rx, ry = ry, rx
+    if abs(ry) >= 90:
+        return
+
+    return rx, ry
+
+
 def haversine(lon1, lat1, lon2, lat2):
     """
     Calculate the great circle distance between two points
