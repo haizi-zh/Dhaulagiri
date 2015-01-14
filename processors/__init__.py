@@ -103,7 +103,9 @@ class BaseProcessor(object):
 
     def _start_workers(self):
         def worker():
-            while not self.tasks.empty() or not self.op_done:
+            while True:
+                if self.op_done and self.tasks.empty():
+                    break
                 try:
                     task = self.tasks.get(timeout=1)
                 except Empty:
@@ -146,7 +148,7 @@ class BaseProcessor(object):
             self.progress += 1
             task()
 
-        self.tasks.put(wrapper)
+        self.tasks.put(wrapper, timeout=120)
         gevent.sleep(0)
 
     def run(self):
