@@ -1,16 +1,17 @@
 # coding=utf-8
 import logging
 import re
+
 from processors import BaseProcessor
 from utils.database import get_mongodb
 from utils.mixin import MfwSuggestion, BaiduSuggestion
-from utils import mercator2wgs
+
 
 __author__ = 'zephyre'
 
 
-class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
-    name = 'baidu-poi'
+class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
+    name = 'baidu-scene'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -21,6 +22,8 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
+        parser.add_argument('--mfw-match', default=False, action='store_true')
         return parser.parse_args()
 
     def get_type_code(self, entry):
@@ -57,14 +60,14 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 coords = location['coordinates']
                 dist = haversine(mfw_sug[0]['lng'], mfw_sug[0]['lat'], coords[0], coords[1])
                 if dist <= 400:
-                    self.log('Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
-                                                               mfw_sug[0]['id']), logging.INFO)
+                    self.log(u'Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
+                                                                mfw_sug[0]['id']), logging.INFO)
                     return {'id': mfw_sug[0]['id'], 'name': mfw_sug[0]['name'], 'type': mfw_sug[0]['type']}
 
             except (IndexError, KeyError, TypeError):
                 continue
 
-        self.log('Cannnot match: %s(%s)' % (entry['sname'], entry['surl']), logging.INFO)
+        self.log(u'Cannnot match: %s(%s)' % (entry['sname'], entry['surl']), logging.INFO)
 
     # 通过id拼接图片url
     @staticmethod
@@ -85,8 +88,8 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
     def text_pro(text):
         if text:
             text = filter(lambda val: val, [tmp.strip() for tmp in re.split(r'\n+', text)])
-            tmp_text = ['<p>%s</p>' % tmp for tmp in text]
-            return '<div>%s</div>' % (''.join(tmp_text))
+            tmp_text = [u'<p>%s</p>' % tmp for tmp in text]
+            return u'<div>%s</div>' % (''.join(tmp_text))
         else:
             return ''
 
@@ -120,7 +123,7 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
             tmp = [traffic_intro.strip()]
             for value in (traffic_details[t_type] for t_type in ['localTraffic', 'remoteTraffic'] if
                           t_type in traffic_details):
-                info_entry = ['%s：\n\n%s' % (value_tmp['title'], value_tmp['contents']) for value_tmp in value]
+                info_entry = [u'%s：\n\n%s' % (value_tmp['title'], value_tmp['contents']) for value_tmp in value]
                 tmp.extend(info_entry)
             tmp = filter(lambda val: val, tmp)
             data['trafficInfo'] = '\n\n'.join(tmp) if tmp else ''
@@ -309,28 +312,53 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
 
         return data
 
-    def build_hotness(self, entry):
-        pass
+    @staticmethod
+    def build_hotness(entry, col, tot):
+        score_list = []
+        for k1, k2 in [['commentCnt', 'rating_count'], ['favorCnt', 'going_count'], ['visitCnt', 'gone_count']]:
+            if k1 not in entry:
+                continue
+            score = col.find({k2: {'$lt': entry[k1]}}, {'_id': 1}).count() / float(tot)
+            score_list.append(score)
+
+        if not score_list:
+            return
+
+        avg = sum(score_list) / len(score_list)
+
+        if entry['hotness']:
+            entry['hotness'] += avg * 0.2 - 0.1
+        else:
+            entry['hotness'] = avg
+        if entry['hotness'] > 1:
+            entry['hotness'] = 1
+        elif entry['hotness'] < 0:
+            entry['hotness'] = 0
 
     def populate_tasks(self):
         col_mdd = get_mongodb('proc_baidu', 'BaiduLocality', profile='mongo-raw')
         col_vs = get_mongodb('proc_baidu', 'BaiduPoi', profile='mongo-raw')
 
-        for col_name in ['BaiduPoi', 'BaiduLocality']:
-            col_raw = get_mongodb('raw_baidu', col_name, profile='mongo-raw')
+        col_name = 'BaiduLocality' if self.args.type == 'mdd' else 'BaiduPoi'
+        col_raw = get_mongodb('raw_baidu', col_name, profile='mongo-raw')
+        tot = col_raw.count()
 
-            cursor = col_raw.find({})
-            cursor.skip(self.args.skip)
-            if self.args.limit:
-                cursor.limit(self.args.limit)
+        cursor = col_raw.find({})
+        cursor.skip(self.args.skip)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
 
-            for entry in cursor:
-                def func(val=entry):
-                    self.get_type_code(val)
-                    data = {'source': {'baidu': {'id': val['sid'], 'surl': val['surl']}}}
-                    self.build_scene(data, val)
+        for entry in cursor:
+            def func(val=entry):
+                self.log(u'Processing: %s, sid=%s, surl=%s' % (val['sname'], val['sid'], val['surl']))
 
-                    location = data['location'] if 'location' in data else None
+                self.get_type_code(val)
+                data = {'source': {'baidu': {'id': val['sid'], 'surl': val['surl']}}}
+                self.build_scene(data, val)
+
+                location = data['location'] if 'location' in data else None
+
+                if self.args.mfw_match:
                     mfw_ret = None
                     if location:
                         mfw_ret = self.match_mfw(val, location)
@@ -340,11 +368,25 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                     else:
                         is_locality = 'type_code' in val and val['type_code'] <= 5
                     val['is_locality'] = is_locality
+                else:
+                    ret = col_vs.find_one({'source.baidu.id': val['sid']}, {'_id': 1})
+                    if ret:
+                        is_locality = False
+                        val['is_locality'] = is_locality
+                    else:
+                        ret = col_mdd.find_one({'source.baidu.id': val['sid']}, {'_id': 1})
+                        if ret:
+                            is_locality = True
+                            val['is_locality'] = is_locality
+                        else:
+                            return
 
-                    self.build_misc(data, val)
+                self.build_misc(data, val)
 
-                    col = col_mdd if is_locality else col_vs
-                    col.update({'source.baidu.id': data['source']['baidu']['id']}, {'$set': data}, upsert=True)
+                self.build_hotness(data, col_raw, tot)
 
-                self.add_task(func)
+                col = col_mdd if is_locality else col_vs
+                col.update({'source.baidu.id': data['source']['baidu']['id']}, {'$set': data}, upsert=True)
+
+            self.add_task(func)
 
