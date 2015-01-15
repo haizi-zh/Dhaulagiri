@@ -37,7 +37,7 @@ class BaiduSuggestion(object):
             e.message += 'url: %s' % url
             raise e
         except (ValueError, KeyError):
-            return None
+            return []
 
 
 class MfwSuggestion(object):
@@ -138,7 +138,10 @@ class MfwSuggestion(object):
 
         try:
             response = requests.get('http://www.mafengwo.cn/poi/%d.html' % poi_id)
-            loc_data = json.loads('{%s}' % re.search(r'window\.Env\s*=\s*\{(.+?)\}\s*;', response.text).group(1))
+            tmp = re.search(r'window\.Env\s*=\s*\{(.+?)\}\s*;', response.text)
+            if not tmp:
+                raise ValueError('No map info found: %s' % response.url)
+            loc_data = json.loads('{%s}' % tmp.group(1))
             lat = loc_data['lat']
             lng = loc_data['lng']
 
