@@ -112,8 +112,6 @@ class BaiduMergeProcessor(BaseProcessor):
                 for m in mergers:
                     m.process(entry, target)
 
-                target['taoziEna'] = True
-
                 col_target.save(target)
 
             self.add_task(func)
