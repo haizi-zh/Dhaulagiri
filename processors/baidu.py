@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import logging
 import re
 
@@ -24,6 +25,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
         parser.add_argument('--mfw-match', default=False, action='store_true')
+        parser.add_argument('--query', type=str)
         return parser.parse_args()
 
     def get_type_code(self, entry):
@@ -44,7 +46,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         from utils import haversine
 
         if 'type_code' not in entry:
-            return entry
+            return
 
         scene_type = 'mdd' if entry['type_code'] <= 5 else 'vs'
 
@@ -196,7 +198,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                      'commentCnt': int(entry['rating_count']) if 'rating_count' in entry else None,
                      'visitCnt': int(entry['gone_count']) if 'gone_count' in entry else None,
                      'favorCnt': int(entry['going_count']) if 'going_count' in entry else None,
-                     'hotness': float(entry['star']) / 5 if 'star' in entry else None}.items():
+                     'rating': float(entry['star']) / 5 if 'star' in entry else None}.items():
             data[k] = v
 
         # 别名
@@ -326,7 +328,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
 
         avg = sum(score_list) / len(score_list)
 
-        if entry['hotness']:
+        if 'hotness' in entry and entry['hotness']:
             entry['hotness'] += avg * 0.2 - 0.1
         else:
             entry['hotness'] = avg
@@ -343,7 +345,9 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         col_raw = get_mongodb('raw_baidu', col_name, profile='mongo-raw')
         tot = col_raw.count()
 
-        cursor = col_raw.find({})
+        query = json.loads(self.args.query) if self.args.query else {}
+
+        cursor = col_raw.find(query)
         cursor.skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
@@ -365,6 +369,10 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
 
                     if mfw_ret:
                         is_locality = True if mfw_ret['type'] == 'mdd' else False
+                        data['source']['mafengwo'] = {'id': mfw_ret['id']}
+                        alias_set = set(data['alias'])
+                        alias_set.add(mfw_ret['name'].strip().lower())
+                        data['alias'] = list(alias_set)
                     else:
                         is_locality = 'type_code' in val and val['type_code'] <= 5
                     val['is_locality'] = is_locality
