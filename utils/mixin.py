@@ -1,21 +1,46 @@
 # coding=utf-8
 import json
 import re
-import requests
+from hashlib import md5
+
+from core import ProcessorEngine
+
+from utils import haversine
 from utils.database import get_mongodb
+
 
 __author__ = 'zephyre'
 
 
 class BaiduSuggestion(object):
-    @staticmethod
-    def get_baidu_sug(name, location):
+    def get_baidu_sug(self, name, location):
         from utils import mercator2wgs
+        from urllib import quote
 
         url = u'http://lvyou.baidu.com/destination/ajax/sug?wd=%s&prod=lvyou_new&su_num=20' % name
 
+        key = quote(name.encode('utf-8'))
+
+        col = get_mongodb('raw_baidu', 'BaiduSug', 'mongo-raw')
+        ret = col.find_one({'key': key}, {'body': 1})
+        body = None
+        if ret:
+            body = ret['body']
+        else:
+            for idx in xrange(5):
+                try:
+                    response = ProcessorEngine.get_instance().request.get(url)
+                    if response:
+                        body = response.text
+                        col.update({'key': key}, {'key': key, 'body': body, 'url': url}, upsert=True)
+                        break
+                except IOError:
+                    pass
+        if not body:
+            return []
+
         try:
-            sug = json.loads(requests.get(url).json()['data']['sug'])
+            sug = json.loads(json.loads(body)['data']['sug'])
             result = []
             for s in sug['s']:
                 tmp = re.split(r'\$', s)
@@ -47,13 +72,30 @@ class MfwSuggestion(object):
 
         :param sug_type suggetion type. Could be one of the following values: 'mdd', 'vs'
         """
-        url = 'http://www.mafengwo.cn/group/ss.php?callback=j&key=%s' % name
+        from urllib import unquote_plus, quote
 
-        from urllib import unquote_plus
+        url = 'http://www.mafengwo.cn/group/ss.php?callback=j&key=%s' % quote(name.encode('utf-8'))
+        key = md5(url).hexdigest()
 
-        response = requests.get(url)
+        col = get_mongodb('raw_mfw', 'MfwSug', 'mongo-raw')
+        ret = col.find_one({'key': key}, {'body': 1})
+        body = None
+        if ret:
+            body = ret['body']
+        else:
+            for idx in xrange(5):
+                try:
+                    response = ProcessorEngine.get_instance().request.get(url)
+                    if response:
+                        body = response.text
+                        col.update({'key': key}, {'key': key, 'body': body, 'name': name, 'url': url}, upsert=True)
+                        break
+                except IOError:
+                    pass
 
-        rtext = unquote_plus(json.loads(response.text[2:-2])['data'].encode('utf-8')).decode('utf-8')
+        if not body:
+            return []
+        rtext = unquote_plus(json.loads(body[2:-2])['data'].encode('utf-8')).decode('utf-8')
 
         # j('search://|mdd|/group/cs.php?t=%E6%90%9C%E7%B4%A2%E7%9B%B4%E8%BE%BE&p=mdd&l=%2Ftravel-scenic-spot%2F
         # mafengwo%2F11124.html&d=%E4%BC%A6%E6%95%A6|ss-place|伦敦|英格兰|伦敦|search://|gonglve|/group/cs.php?t=
@@ -98,6 +140,8 @@ class MfwSuggestion(object):
             col_list = [col_mfw_vs, col_mfw_mdd]
 
         results = []
+        coords = location['coordinates']
+
         for r in filter(lambda val: re.search(r'\|(mdd|scenic)\|', val), re.split(r'search://', rtext)):
 
             for idx, t in enumerate(tmpl_list):
@@ -120,9 +164,10 @@ class MfwSuggestion(object):
                     except (KeyError, ValueError, TypeError):
                         continue
 
-                    results.append({'id': rid, 'name': name, 'type': type_list[idx], 'lat': lat, 'lng': lng})
-                    break
-
+                    dist = haversine(lng, lat, coords[0], coords[1])
+                    if dist < 400:
+                        results.append({'id': rid, 'name': name, 'type': type_list[idx], 'lat': lat, 'lng': lng,
+                                        'dist': dist})
         return results
 
     @staticmethod
@@ -137,17 +182,30 @@ class MfwSuggestion(object):
         from lxml import etree
 
         try:
-            response = requests.get('http://www.mafengwo.cn/poi/%d.html' % poi_id)
-            tmp = re.search(r'window\.Env\s*=\s*\{(.+?)\}\s*;', response.text)
+            body = None
+            col = get_mongodb('raw_mfw', 'MfwPoiBody', 'mongo-raw')
+            ret = col.find_one({'key': poi_id}, {'body': 1})
+            if ret:
+                body = ret['body']
+            else:
+                url = 'http://www.mafengwo.cn/poi/%d.html' % poi_id
+                response = ProcessorEngine.get_instance().request.get(url)
+                if response:
+                    body = response.text
+                    col.update({'key': poi_id}, {'key': poi_id, 'body': body}, upsert=True)
+            if not body:
+                return
+
+            tmp = re.search(r'window\.Env\s*=\s*\{(.+?)\}\s*;', body)
             if not tmp:
-                raise ValueError('No map info found: %s' % response.url)
+                raise ValueError('No map info found: %d' % poi_id)
             loc_data = json.loads('{%s}' % tmp.group(1))
             lat = loc_data['lat']
             lng = loc_data['lng']
 
-            tree = etree.fromstring(response.text, etree.HTMLParser())
+            tree = etree.fromstring(body, etree.HTMLParser())
             title = unicode(tree.xpath('//div[@class="col-main"]//div[contains(@class,"title")]'
                                        '/div[@class="t"]/h1/text()')[0])
             return {'lat': lat, 'lng': lng, 'title': title}
         except IOError:
-            return None
+            return

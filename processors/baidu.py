@@ -26,7 +26,8 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
         parser.add_argument('--mfw-match', default=False, action='store_true')
         parser.add_argument('--query', type=str)
-        return parser.parse_args()
+        args, leftover = parser.parse_known_args()
+        return args
 
     def get_type_code(self, entry):
         """
@@ -43,8 +44,6 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 return entry
 
     def match_mfw(self, entry, location):
-        from utils import haversine
-
         if 'type_code' not in entry:
             return
 
@@ -57,17 +56,12 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 name_list.append(name)
 
         for name in name_list:
-            mfw_sug = self.get_mfw_sug(name, scene_type, None)
-            try:
-                coords = location['coordinates']
-                dist = haversine(mfw_sug[0]['lng'], mfw_sug[0]['lat'], coords[0], coords[1])
-                if dist <= 400:
-                    self.log(u'Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
-                                                                mfw_sug[0]['id']), logging.INFO)
-                    return {'id': mfw_sug[0]['id'], 'name': mfw_sug[0]['name'], 'type': mfw_sug[0]['type']}
+            mfw_sug = self.get_mfw_sug(name, scene_type, location)
 
-            except (IndexError, KeyError, TypeError):
-                continue
+            if mfw_sug:
+                self.log(u'Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
+                                                            mfw_sug[0]['id']), logging.INFO)
+                return {'id': mfw_sug[0]['id'], 'name': mfw_sug[0]['name'], 'type': mfw_sug[0]['type']}
 
         self.log(u'Cannnot match: %s(%s)' % (entry['sname'], entry['surl']), logging.INFO)
 
@@ -394,7 +388,12 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 self.build_hotness(data, col_raw, tot)
 
                 col = col_mdd if is_locality else col_vs
-                col.update({'source.baidu.id': data['source']['baidu']['id']}, {'$set': data}, upsert=True)
+                source = data.pop('source')
+                ops = {'$set': data}
+                if 'mafengwo' in source:
+                    ops['$set']['source.mafengwo'] = source['mafengwo']
+
+                col.update({'source.baidu.id': source['baidu']['id']}, ops, upsert=True)
 
             self.add_task(func)
 

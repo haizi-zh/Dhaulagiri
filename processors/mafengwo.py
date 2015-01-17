@@ -3,15 +3,16 @@
 import json
 import logging
 import re
+from hashlib import md5
 
 import gevent
 from lxml.sax import ElementTreeContentHandler
+
 from processors import BaseProcessor, runproc
 from utils import haversine
-
 from utils.database import get_mongodb
-from hashlib import md5
 from utils.mixin import BaiduSuggestion
+
 
 __author__ = 'zephyre'
 
@@ -45,8 +46,11 @@ class MfwImageExtractor(object):
                 return ret
 
 
-class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
-    name = 'mfw-poi-comment'
+class SuggestionProcessor(BaseProcessor):
+    """
+    读取蚂蜂窝的输入提示
+    """
+    name = 'mfw-sug'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -56,24 +60,106 @@ class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
-        return parser.parse_args()
+        parser.add_argument('--query', type=str)
+        args, leftover = parser.parse_known_args()
+        return args
 
-    @runproc
-    def run(self):
+    def populate_tasks(self):
+        from urllib import quote
+
+        col_raw1 = get_mongodb('raw_baidu', 'BaiduPoi', 'mongo-raw')
+        col_raw2 = get_mongodb('raw_baidu', 'BaiduLocality', 'mongo-raw')
+
+        col = get_mongodb('raw_mfw', 'MfwSug', 'mongo-raw')
+
+        query = json.loads(self.args.query) if self.args.query else {}
+
+        for col_raw in [col_raw1, col_raw2]:
+            cursor = col_raw.find(query, {'ambiguity_sname': 1, 'sname': 1, 'sid': 1}).skip(self.args.skip)
+            if self.args.limit:
+                cursor.limit(self.args.limit)
+
+            for val in cursor:
+                def func(entry=val):
+
+                    for name in set(filter(lambda v: v.strip(), [entry[k] for k in ['ambiguity_sname', 'sname']])):
+                        self.log(u'Parsing: %s, id=%s' % (name, entry['sid']))
+
+                        url = 'http://www.mafengwo.cn/group/ss.php?callback=j&key=%s' % quote(name.encode('utf-8'))
+                        key = md5(url).hexdigest()
+
+                        if col.find_one({'key': key}, {'_id': 1}):
+                            # The record already exists
+                            self.log(u'Already exists, skipping: %s, id=%s' % (name, entry['sid']))
+                            continue
+
+                        response = self.request.get(url)
+                        if not response:
+                            self.log(u'Failed to query url: %s, %s, id=%s' % (url, name, entry['sid']), logging.ERROR)
+                            continue
+
+                        col.update({'key': key}, {'key': key, 'body': response.text, 'name': name, 'url': url},
+                                   upsert=True)
+
+                self.add_task(func)
+
+
+class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
+    name = 'mfw-poi-comment'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        MfwImageExtractor.__init__(self)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        args, leftover= parser.parse_known_args()
+        return args
+
+    def populate_tasks(self):
         col = get_mongodb('raw_mfw', 'MafengwoComment', 'mongo-raw')
+        col_vs = get_mongodb('poi', 'ViewSpot', 'mongo')
+        col_dining = get_mongodb('poi', 'Restaurant', 'mongo')
+        col_shopping = get_mongodb('poi', 'Shopping', 'mongo')
 
         cursor = col.find({}, snapshot=True)
         cursor.skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
 
-        print '%d documents to process...' % cursor.count(with_limit_and_skip=True)
+        for val in cursor:
+            def func(entry=val):
+                poi_dbs = {'vs': col_vs, 'dining': col_dining, 'shopping': col_shopping}
 
-        jobs = []
-        for entry in cursor:
-            jobs.append(gevent.spawn(self.parse, entry))
+                def fetch_poi_item(mfw_id, poi_type):
+                    col_poi = poi_dbs[poi_type]
+                    tmp = col_poi.find_one({'source.mafengwo.id': mfw_id}, {'_id': 1})
+                    if tmp:
+                        return {'type': poi_type, 'item_id': tmp['_id']}
+                    else:
+                        return None
 
-        gevent.joinall(jobs)
+                ret = None
+                for v in ['vs', 'dining', 'shopping']:
+                    ret = fetch_poi_item(entry['poi_id'], v)
+                    if ret:
+                        break
+
+                if not ret:
+                    return
+
+                for item_type, item_data in self.parse_contents(entry['contents']):
+                    if item_type != 'image':
+                        item_data['source'] = {'mafengwo': {'id': entry['comment_id']}}
+                        item_data['type'] = ret['type']
+                        item_data['itemId'] = ret['item_id']
+
+                    self.update(item_type, item_data)
+
+            self.add_task(func)
 
 
     @staticmethod
