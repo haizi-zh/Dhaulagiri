@@ -10,6 +10,7 @@ from lxml.sax import ElementTreeContentHandler
 from hashlib import md5
 
 import gevent
+from lxml.etree import XMLSyntaxError
 import pysolr
 from scrapy import Selector
 
@@ -17,7 +18,7 @@ from processors import BaseProcessor, runproc
 from processors.youji_mixin import MfwDomTreeProc
 from utils import haversine
 from utils.database import get_mongodb, get_solr
-from utils.mixin import baidu_suggestion
+from utils.mixin import BaiduSuggestion
 
 
 __author__ = 'zephyre'
@@ -198,8 +199,7 @@ class MfwHtmlHandler(ElementTreeContentHandler):
         ElementTreeContentHandler.startElementNS(self, ns_name, qname, attributes)
 
 
-@baidu_suggestion
-class MafengwoProcessor(BaseProcessor):
+class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
     """
     马蜂窝目的地的清洗
 
@@ -553,9 +553,8 @@ class MafengwoProcessor(BaseProcessor):
                     if 'baidu' not in data['source']:
                         self.log('Not matched: %s' % data['zhName'])
 
-                processor.log(
-                    'Parsing done: %s / %s / %s' % tuple(
-                        data[key] if key in data else None for key in ['zhName', 'enName', 'locName']))
+                self.log('Parsing done: %s / %s / %s' % tuple(data[key] if key in data else None for key in
+                                                              ['zhName', 'enName', 'locName']))
 
                 col_proc_mdd.update({'source.mafengwo.id': data['source']['mafengwo']['id']}, {'$set': data},
                                     upsert=True)
@@ -660,7 +659,7 @@ class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
     def populate_tasks(self):
         col_raw_mfw_note = get_mongodb('raw_mfw', 'MafengwoNote', 'mongo-raw')
         col_image = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
-        col_mfw_note = get_mongodb('travelnote', 'MafengwoNote', 'mongo')
+        col_mfw_note = get_mongodb('travelnote', 'BaiduNoteMain', 'mongo')
         cursor = col_raw_mfw_note.find({'main_post': True})
         for entry in cursor:
             def func(val=entry):
@@ -679,6 +678,9 @@ class MfwNoteProc(BaseProcessor, MfwDomTreeProc):
 
 
 class NoteSolr(BaseProcessor):
+    """
+    数据上传到solr服务器
+    """
     name = 'note_solr'
 
     def __init__(self, *args, **kwargs):
@@ -693,65 +695,70 @@ class NoteSolr(BaseProcessor):
         return parser.parse_args()
 
     def get_data(self, item):
-        note_id = item['source'][self.args.query]['id']
+        contents = item['contents']
+        if not contents:  # 没有游记正文不做处理
+            return None
+        # 判断是百度游记还是蚂蜂窝游记
+        for tmp in item['source']:
+            note_id = item['source'][tmp]['id']
+        # data数据
         data = {'id': str(item['_id']),
                 'title': item['title'],
                 'note_id': note_id
         }
-        contents = item['contents']
+        # 游记正文文本抽取
         content_list = []
         for node in contents:
-            cnt_text_list = filter(lambda val: val, etree.fromstring(node['content']).xpath('//text()'))
-            if not cnt_text_list:
+            try:
+                tmp_text_list = etree.fromstring(node['content']).xpath('//text()')
+            except XMLSyntaxError, e:
+                self.log('note_id %s ,error: %s' % (note_id, e.message))
                 continue
-            cnt_text = ','.join(cnt_text_list)
+            tmp_text_list = filter(lambda val: re.search(r'[\s|-]', val) is None, tmp_text_list)
+            cnt_text = ''.join(tmp_text_list)
             if node['title']:
-                tmp_ful_text = node['title'], '%s' % cnt_text
-            else:
-                tmp_ful_text = cnt_text
-            content_list.extend(tmp_ful_text)
-        data['contents'] = '\n'.join(content_list)
+                cnt_text = '%s:% s' % (node['title'], cnt_text)
+            content_list.append(cnt_text)
+        data['contents'] = ';'.join(content_list)
         if data['contents']:
             return data
         else:
             return None
 
+    def populate_tasks(self):
+        # 链接mongo
+        col = get_mongodb('travelnote', 'TravelNote', 'mongo')
+        solr_s = get_solr('travelnote')
+        for item in col.find():
+            def func(entry=item):
+                # 处理item
+                data = self.get_data(entry)
+                if data:
+                    doc = [{'id': data['id'], 'note_id': data['note_id'], 'title': data['title'],
+                            'contents': data['contents']}]
+                    try:
+                        solr_s.add(doc)
+                    except pysolr.SolrError, e:
+                        self.log('error:%s,id:%s' % (e.message, data['id']))
+
+            self.add_task(func)
+
+
+class NoteCombiner(BaseProcessor):
+    name = 'note_comb'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
 
     def populate_tasks(self):
-        query = self.args.query
-        if query == 'baidu':
-            col_name = 'BaiduNoteMain'
-        elif query == 'mfw':
-            col_name = 'MafengwoNote'
-        col = get_mongodb('travelnote', col_name, 'mongo')
-        cursor = col.find()
-        solr_s = get_solr('solr')
-        for item in cursor:
-            if item['contents']:
-                def func(entry=item):
-                    data = self.get_data(entry)
-                    if data:
-                        doc = [{
-                                   'id': data['id'],
-                                   'note_id': data['note_id'],
-                                   'title': data['title'],
-                                   'contents': data['contents']
-                               }]
-                        try:
-                            solr_s.add(doc)
-                        except pysolr.SolrError, e:
-                            self.log('error:%s,id:%s' % (e.message, data['id']))
-                            pass
-                    else:
-                        pass
+        b_col = get_mongodb('travelnote', 'BaiduNoteMain', 'mongo')
+        m_col = get_mongodb('travelnote', 'MafengwoNote', 'mongo')
+        b_cursor = b_col.find()
+        for item in b_cursor:
+            def func(entry=item):
+                m_col.update({'_id': entry['_id']}, {'$set': entry}, upsert=True)
 
-                self.add_task(func)
-            else:
-                continue
-
-
-
-
+            self.add_task(func)
 
 
 

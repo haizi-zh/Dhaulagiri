@@ -1,11 +1,11 @@
 # coding=utf-8
 import pysolr
-from utils import load_config
+from utils import load_yaml
 
 __author__ = 'zephyre'
 
 
-def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, user=None, passwd=None):
+def get_mongodb(db_name, col_name, profile):
     """
     建立MongoDB的连接。
     :param host:
@@ -16,29 +16,64 @@ def get_mongodb(db_name, col_name, profile=None, host='localhost', port=27017, u
     """
 
     cached = getattr(get_mongodb, 'cached', {})
-    sig = '%s|%s|%s|%s|%s|%s|%s' % (db_name, col_name, profile, host, port, user, passwd)
-    if sig in cached:
-        return cached[sig]
 
-    cfg = dict(load_config())
-    if profile and profile in cfg:
-        section = cfg[profile]
+    if profile in cached:
+        client = cached[profile]['client']
+        db_set = cached[profile]['dbset']
+    else:
+        client = None
+        db_set = None
+
+    if not client:
+        cfg = load_yaml()
+        section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
+
         host = section.get('host', 'localhost')
         port = int(section.get('port', '27017'))
-        user = section.get('user', None)
-        passwd = section.get('passwd', None)
 
-    from pymongo import MongoClient
+        if section.get('replica', False):
+            from pymongo import MongoReplicaSetClient
+            from pymongo import ReadPreference
 
-    mongo_conn = MongoClient(host, port)
-    db = mongo_conn[db_name]
-    if user and passwd:
-        db.authenticate(name=user, password=passwd)
-    col = db[col_name]
+            client = MongoReplicaSetClient('%s:%d' % (host, port), replicaSet=section.get('replName'))
 
-    cached[sig] = col
-    setattr(get_mongodb, 'cached', cached)
-    return col
+            pref = section.get('readPref', 'PRIMARY')
+            client.read_preference = getattr(ReadPreference, pref)
+
+        else:
+            from pymongo import MongoClient
+
+            client = MongoClient(host, port)
+
+        cached[profile] = {'client': client}
+        setattr(get_mongodb, 'cached', cached)
+
+    db = client[db_name]
+
+    if not db_set:
+        db_set = set([])
+    if db_name not in db_set:
+        cfg = load_yaml()
+        section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
+
+        user = None
+        passwd = None
+        auth = section.get('auth')
+        if auth:
+            db_auth = filter(lambda v: db_name in v['database'], auth)
+            if db_auth:
+                db_auth = db_auth[0]
+                user = db_auth['user']
+                passwd = db_auth['passwd']
+
+        if user and passwd:
+            db.authenticate(name=user, password=passwd)
+
+        db_set.add(db_name)
+        cached[profile]['dbset'] = db_set
+        setattr(get_mongodb, 'cached', cached)
+
+    return db[col_name]
 
 
 def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost', port=3306):
@@ -58,7 +93,7 @@ def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost'
     if sig in cached:
         return cached[sig]
 
-    cfg = dict(load_config())
+    cfg = load_yaml()
     if profile and profile in cfg:
         section = cfg[profile]
         host = section.get('host', 'localhost')
@@ -74,8 +109,9 @@ def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost'
 
 
 def get_solr(profile):
-    cfg = dict(load_config())
-    section = cfg[profile]
+    cfg = load_yaml()
+    section = filter(lambda v: v['profile'] == profile, cfg['solr'])[0]
+
     host = section.get('host')
     port = section.get('port')
     # solr配置

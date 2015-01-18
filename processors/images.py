@@ -1,5 +1,6 @@
 # coding=utf-8
 import argparse
+import logging
 import re
 from hashlib import md5
 
@@ -8,15 +9,220 @@ import pymongo
 from pymongo.errors import DuplicateKeyError
 
 from processors import BaseProcessor
+from utils.database import get_mongodb
+
+import requests
 
 
 __author__ = 'zephyre'
+
+
+class ImageUploader(BaseProcessor):
+    """
+    将图像从ImageCandidates中上传
+    """
+
+    name = 'image-upload'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--url-filter', type=str)
+        return parser.parse_args()
+
+    @staticmethod
+    def check_exist(entry):
+        """
+        Check if an image is already processed
+        """
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+
+        url = entry['url']
+        url_hash = md5(url).hexdigest()
+        assert url_hash == entry['url_hash']
+        ret = col_im.find_one({'url_hash': url_hash}, {'_id': 1})
+
+        return bool(ret)
+
+    @staticmethod
+    def check_image(buf):
+        """
+        Check if an image is valid
+        """
+        pass
+
+    @staticmethod
+    def auth():
+        """
+        Authenticate
+
+        :param key:
+        :param bucket:
+        """
+        from qiniu import Auth
+        from utils import load_yaml
+
+        cfg = load_yaml()
+
+        # 获得上传权限
+        section = cfg['qiniu']
+        ak = section['ak']
+        sk = section['sk']
+        q = Auth(ak, sk)
+
+        return q
+
+    @staticmethod
+    def on_failure(entry):
+        """
+        Called on failure
+        """
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+
+        if 'failCnt' not in entry:
+            entry['failCnt'] = 0
+        entry['failCnt'] += 1
+        col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
+
+    def upload_image(self, entry, response):
+        """
+        Upload the image to the qiniu bucket
+        """
+        from qiniu import put_data
+
+        image = entry
+        key = image['key']
+        bucket = image['bucket']
+
+        sc = False
+        self.log('START UPLOADING: %s <= %s' % (key, response.url), logging.INFO)
+
+        token = self.auth().upload_token(bucket, key)
+
+        for idx in xrange(5):
+            ret, info = put_data(token, key, response.content, check_crc=True)
+            if not ret:
+                self.log('UPLOADING FAILED #%d: %s, reason: %s' % (idx, key, info.error), logging.WARN)
+                continue
+            else:
+                sc = True
+                break
+        if not sc:
+            raise IOError
+        self.log('UPLOADING COMPLETED: %s' % key, logging.INFO)
+
+    def fetch_stat(self, entry):
+        """
+        Get stat for the image
+        """
+        from qiniu import BucketManager
+
+        mgr = BucketManager(self.auth())
+
+        ret, info = mgr.stat(entry['bucket'], entry['key'])
+
+        if not ret:
+            self.log('Failed to get stat for image: key=%s, bucket=%s' % (entry['key'], entry['bucket']), logging.WARN)
+            raise IOError
+
+        entry['size'] = ret['fsize']
+        entry['hash'] = ret['hash']
+        entry['type'] = ret['mimeType']
+        entry['cTime'] = ret['putTime'] / 10000000
+
+        return entry
+
+    def fetch_info(self, entry):
+        """
+        Get image information
+        """
+        bucket = entry['bucket']
+        key = entry['key']
+        try:
+            response = requests.get('http://%s.qiniudn.com/%s?imageInfo' % (bucket, key))
+            image_info = response.json()
+
+            if 'error' not in image_info:
+                entry['cm'] = image_info['colorModel']
+                entry['h'] = image_info['height']
+                entry['w'] = image_info['width']
+                entry['fmt'] = image_info['format']
+                return entry
+            else:
+                raise IOError
+        except IOError:
+            self.log('Failed to get info for image: key=%s, bucket=%s' % (entry['key'], entry['bucket']), logging.WARN)
+            raise IOError
+
+    def proc_image(self, entry):
+        """
+        Process the imaeg item
+        """
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+
+        entry['key'] = entry['url_hash']
+        entry['bucket'] = 'aizou'
+
+        if self.check_exist(entry):
+            col_cand.remove({'_id': entry['_id']})
+            return
+
+        url = entry['url']
+        try:
+            response = requests.get(url)
+            if response.status_code != 200:
+                self.log('Failed to download download image (code=%d): key=%s, url=%s' % (
+                    response.status_code, entry['key'], entry['url']),
+                         logging.WARN)
+                raise IOError
+
+            self.upload_image(entry, response)
+            self.fetch_stat(entry)
+            self.fetch_info(entry)
+
+            col_im.update({'url_hash': entry['url_hash']}, {'$set': entry}, upsert=True)
+            col_cand.remove({'_id': entry['_id']})
+
+        except IOError:
+            self.on_failure(entry)
+            return
+
+    def populate_tasks(self):
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+
+        cursor = col_cand.find({'$or': [{'failCnt': None}, {'failCnt': {'$lt': 5}}]}, snapshot=True)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        cursor.skip(self.args.skip)
+
+        for val in cursor:
+            def task(entry=val):
+
+                if self.args.url_filter:
+                    pattern = self.args.url_filter
+                    if not re.match(pattern, entry['url']):
+                        self.log('Skipped image: %s' % entry['url'])
+                        return
+
+                self.log('Processing image: %s' % entry['url'])
+                self.proc_image(entry)
+
+            self.add_task(task)
 
 
 class ImageTransfer(BaseProcessor):
     """
     图像的迁移。从lvxpingpai-img-store迁移到aizou，同时优化imagestore数据存储的格式
     """
+
+    def populate_tasks(self):
+        pass
 
     name = 'image-transfer'
 
@@ -37,9 +243,9 @@ class ImageTransfer(BaseProcessor):
     def bucket_mgr():
         from qiniu import Auth
         from qiniu import BucketManager
-        from utils import load_config
+        from utils import load_yaml
 
-        conf = load_config()['qiniu']
+        conf = load_yaml()['qiniu']
 
         access_key = conf['ak']
         secret_key = conf['sk']
@@ -133,6 +339,9 @@ class ImageValidator(BaseProcessor):
     图像验证
     """
 
+    def populate_tasks(self):
+        pass
+
     name = 'image-validate'
 
     def __init__(self):
@@ -203,7 +412,7 @@ class ImageValidator(BaseProcessor):
                             img.pop('cropHint')
 
                 if modified:
-                    print 'Updateing %s' % val['_id']
+                    print 'Updating %s' % val['_id']
                     col.update({'_id': val['_id']}, {'$set': {'images': val['images']}})
 
             self.add_task(func)
