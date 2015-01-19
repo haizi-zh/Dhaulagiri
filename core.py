@@ -1,5 +1,6 @@
 # coding=utf-8
 import logging
+
 from gevent.lock import BoundedSemaphore
 
 from middlewares import MiddlewareManager
@@ -193,45 +194,58 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
-    def get(self, url, **kwargs):
+    def get(self, url, retry=5, **kwargs):
         from requests import Request, Session
 
-        req = Request(method='GET', url=url, headers=kwargs['headers'] if 'headers' in kwargs else None,
-                      data=kwargs['data'] if 'data' in kwargs else None,
-                      params=kwargs['params'] if 'params' in kwargs else None,
-                      auth=kwargs['auth'] if 'auth' in kwargs else None,
-                      cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
-        prepped = req.prepare()
+        for idx in xrange(retry):
+            try:
+                req = Request(method='GET', url=url, headers=kwargs['headers'] if 'headers' in kwargs else None,
+                              data=kwargs['data'] if 'data' in kwargs else None,
+                              params=kwargs['params'] if 'params' in kwargs else None,
+                              auth=kwargs['auth'] if 'auth' in kwargs else None,
+                              cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
+                prepped = req.prepare()
 
-        s = Session()
-        s_args = {}
+                s = Session()
+                s_args = {}
 
-        for entry in self._engine.middleware_manager.mw_dict['download']:
-            mw = entry['middleware']
-            ret = mw.on_request(prepped, s, s_args)
-            prepped, s, s_args = ret['value']
-            pass_next = ret['next']
-            if not pass_next:
-                break
+                if 'download' in self._engine.middleware_manager.mw_dict:
+                    mw_list = self._engine.middleware_manager.mw_dict['download']
+                else:
+                    mw_list = []
 
-        try:
-            response = s.send(prepped, **s_args)
-        except IOError as e:
-            for entry in self._engine.middleware_manager.mw_dict['download']:
-                mw = entry['middleware']
-                pass_next = mw.on_failure(prepped, s_args)
-                if not pass_next:
-                    break
-            raise e
+                for entry in mw_list:
+                    mw = entry['middleware']
+                    ret = mw.on_request(prepped, s, s_args)
+                    prepped, s, s_args = ret['value']
+                    pass_next = ret['next']
+                    if not pass_next:
+                        break
 
-        for entry in self._engine.middleware_manager.mw_dict['download']:
-            mw = entry['middleware']
-            ret = mw.on_response(response)
-            response = ret['value']
-            pass_next = ret['next']
-            if not pass_next:
-                break
+                try:
+                    response = s.send(prepped, **s_args)
+                except IOError as e:
+                    for entry in mw_list:
+                        mw = entry['middleware']
+                        pass_next = mw.on_failure(prepped, s_args)
+                        if not pass_next:
+                            break
+                    raise e
 
-        return response
+                for entry in mw_list:
+                    mw = entry['middleware']
+                    ret = mw.on_response(response)
+                    response = ret['value']
+                    pass_next = ret['next']
+                    if not pass_next:
+                        break
+
+                return response
+            except IOError as e:
+                # 最多尝试次数：retry
+                if idx < retry - 1:
+                    continue
+                else:
+                    raise e
 
 
