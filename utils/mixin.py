@@ -127,13 +127,13 @@ class MfwSuggestion(object):
         col_mfw_vs = get_mongodb('raw_mfw', 'MafengwoVs', 'mongo-raw')
 
         if sug_type == 'mdd':
-            tmpl_list = [tmpl['mdd'], tmpl['vs']]
-            type_list = ['mdd', 'vs']
-            col_list = [col_mfw_mdd, col_mfw_vs]
+            tmpl_list = [tmpl['mdd']]
+            type_list = ['mdd']
+            col_list = [col_mfw_mdd]
         else:
-            tmpl_list = [tmpl['vs'], tmpl['mdd']]
-            type_list = ['vs', 'mdd']
-            col_list = [col_mfw_vs, col_mfw_mdd]
+            tmpl_list = [tmpl['vs']]
+            type_list = ['vs']
+            col_list = [col_mfw_vs]
 
         results = []
         coords = location['coordinates']

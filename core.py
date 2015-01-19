@@ -65,7 +65,7 @@ class LoggerMixin(object):
                 pass
 
             log_file = os.path.normpath(os.path.join(log_path, '%s.log' % name))
-            handler = TimedRotatingFileHandler(log_file, when='d', encoding='utf-8')
+            handler = TimedRotatingFileHandler(log_file, when='d', interval=1, encoding='utf-8')
 
         log_level = logging.DEBUG if args.debug else logging.INFO
         handler.setLevel(log_level)

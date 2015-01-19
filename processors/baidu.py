@@ -44,10 +44,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 return entry
 
     def match_mfw(self, entry, location):
-        if 'type_code' not in entry:
-            return
-
-        scene_type = 'mdd' if entry['type_code'] <= 5 else 'vs'
+        scene_type = 'mdd' if entry['is_locality'] else 'vs'
 
         name_list = []
         for key in ['sname', 'ambiguity_sname']:
@@ -335,8 +332,7 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         col_mdd = get_mongodb('proc_baidu', 'BaiduLocality', profile='mongo-raw')
         col_vs = get_mongodb('proc_baidu', 'BaiduPoi', profile='mongo-raw')
 
-        col_name = 'BaiduLocality' if self.args.type == 'mdd' else 'BaiduPoi'
-        col_raw = get_mongodb('raw_baidu', col_name, profile='mongo-raw')
+        col_raw = get_mongodb('raw_baidu', 'BaiduScene', profile='mongo-raw')
         tot = col_raw.count()
 
         query = json.loads(self.args.query) if self.args.query else {}
@@ -351,6 +347,12 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 self.log(u'Processing: %s, sid=%s, surl=%s' % (val['sname'], val['sid'], val['surl']))
 
                 self.get_type_code(val)
+                if 'type_code' not in val:
+                    self.logger.error(
+                        'Cannot find type code for: %s, sid=%s, surl=%s' % (val['sname'], val['sid'], val['surl']))
+                    return
+
+                val['is_locality'] = val['type_code'] <= 5
                 data = {'source': {'baidu': {'id': val['sid'], 'surl': val['surl']}}}
                 self.build_scene(data, val)
 
@@ -362,32 +364,16 @@ class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                         mfw_ret = self.match_mfw(val, location)
 
                     if mfw_ret:
-                        is_locality = True if mfw_ret['type'] == 'mdd' else False
                         data['source']['mafengwo'] = {'id': mfw_ret['id']}
                         alias_set = set(data['alias'])
                         alias_set.add(mfw_ret['name'].strip().lower())
                         data['alias'] = list(alias_set)
-                    else:
-                        is_locality = 'type_code' in val and val['type_code'] <= 5
-                    val['is_locality'] = is_locality
-                else:
-                    ret = col_vs.find_one({'source.baidu.id': val['sid']}, {'_id': 1})
-                    if ret:
-                        is_locality = False
-                        val['is_locality'] = is_locality
-                    else:
-                        ret = col_mdd.find_one({'source.baidu.id': val['sid']}, {'_id': 1})
-                        if ret:
-                            is_locality = True
-                            val['is_locality'] = is_locality
-                        else:
-                            return
 
                 self.build_misc(data, val)
 
                 self.build_hotness(data, col_raw, tot)
 
-                col = col_mdd if is_locality else col_vs
+                col = col_mdd if val['is_locality'] else col_vs
                 source = data.pop('source')
                 ops = {'$set': data}
                 if 'mafengwo' in source:
