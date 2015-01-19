@@ -18,7 +18,7 @@ class BaseMerger(object):
             self.fields.add(f)
 
 
-class LocalityAppender(BaseMerger):
+class Appender(BaseMerger):
     def process(self, source, target):
         for f in self.fields:
             if f not in source or (f in target and target[f]):
@@ -26,8 +26,12 @@ class LocalityAppender(BaseMerger):
             target[f] = source[f]
 
 
-class PoiAppender(LocalityAppender):
-    pass
+class Overwriter(BaseMerger):
+    def process(self, source, target):
+        for f in self.fields:
+            if f not in source or not source[f]:
+                continue
+            target[f] = source[f]
 
 
 class SetAdder(BaseMerger):
@@ -68,7 +72,7 @@ class BaiduMergeProcessor(BaseProcessor):
 
     def populate_tasks(self):
         col_src, db_tar, col_tar = ('BaiduLocality', 'geo', 'Locality') if self.args.type == 'mdd' else (
-        'BaiduPoi', 'poi', 'ViewSpot')
+            'BaiduPoi', 'poi', 'ViewSpot')
         col = get_mongodb('proc_baidu', col_src, profile='mongo-raw')
 
         col_target = get_mongodb(db_tar, col_tar, profile='mongo')
@@ -82,12 +86,12 @@ class BaiduMergeProcessor(BaseProcessor):
         merger_rules = load_yaml()['merger']
 
         for name in self.args.merger:
-            m = globals()[name]()
+            rule = merger_rules[name]
+            m = globals()[rule['class']]()
 
-            rules = merger_rules[name]
-            m.add_fields(rules['fields'])
-            if 'priority' in rules:
-                m.priority = rules['priority']
+            m.add_fields(rule['fields'])
+            if 'priority' in rule:
+                m.priority = rule['priority']
             mergers.append(m)
         mergers = sorted(mergers, key=lambda v: v.priority)
 
