@@ -27,15 +27,13 @@ class BaiduSuggestion(object):
         if ret:
             body = ret['body']
         else:
-            for idx in xrange(5):
-                try:
-                    response = ProcessorEngine.get_instance().request.get(url)
-                    if response:
-                        body = response.text
-                        col.update({'key': key}, {'key': key, 'body': body, 'url': url}, upsert=True)
-                        break
-                except IOError:
-                    pass
+            try:
+                response = ProcessorEngine.get_instance().request.get(url)
+                if response:
+                    body = response.text
+                    col.update({'key': key}, {'key': key, 'body': body, 'url': url}, upsert=True)
+            except IOError:
+                pass
         if not body:
             return []
 
@@ -83,15 +81,13 @@ class MfwSuggestion(object):
         if ret:
             body = ret['body']
         else:
-            for idx in xrange(5):
-                try:
-                    response = ProcessorEngine.get_instance().request.get(url)
-                    if response:
-                        body = response.text
-                        col.update({'key': key}, {'key': key, 'body': body, 'name': name, 'url': url}, upsert=True)
-                        break
-                except IOError:
-                    pass
+            try:
+                response = ProcessorEngine.get_instance().request.get(url)
+                if response:
+                    body = response.text
+                    col.update({'key': key}, {'key': key, 'body': body, 'name': name, 'url': url}, upsert=True)
+            except IOError:
+                pass
 
         if not body:
             return []
