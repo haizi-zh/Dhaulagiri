@@ -4,7 +4,6 @@ import re
 from hashlib import md5
 
 from core import ProcessorEngine
-
 from utils import haversine
 from utils.database import get_mongodb
 
@@ -166,8 +165,7 @@ class MfwSuggestion(object):
                                         'dist': dist})
         return results
 
-    @staticmethod
-    def poi_info(poi_id):
+    def poi_info(self, poi_id):
         """
         Get additional information of a POI
 
@@ -196,6 +194,11 @@ class MfwSuggestion(object):
             if not tmp:
                 raise ValueError('No map info found: %d' % poi_id)
             loc_data = json.loads('{%s}' % tmp.group(1))
+            if 'lat' not in loc_data or 'lng' not in loc_data:
+                if 'logger' in self:
+                    logger = getattr(self, 'logger')
+                    logger.warn('Failed to retrieve map info: %d' % poi_id)
+                return
             lat = loc_data['lat']
             lng = loc_data['lng']
 
