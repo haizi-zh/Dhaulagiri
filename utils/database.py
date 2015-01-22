@@ -55,8 +55,6 @@ def get_mongodb(db_name, col_name, profile):
         cfg = load_yaml()
         section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
 
-        user = None
-        passwd = None
         auth = section.get('auth')
         if auth:
             db_auth = filter(lambda v: db_name in v['database'], auth)
@@ -64,9 +62,9 @@ def get_mongodb(db_name, col_name, profile):
                 db_auth = db_auth[0]
                 user = db_auth['user']
                 passwd = db_auth['passwd']
-
-        if user and passwd:
-            db.authenticate(name=user, password=passwd)
+                credb = client[getattr(auth, 'credb', 'admin')]
+                if user and passwd:
+                    credb.authenticate(name=user, password=passwd)
 
         db_set.add(db_name)
         cached[profile]['dbset'] = db_set
