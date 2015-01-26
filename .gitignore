@@ -57,10 +57,5 @@ target/
 
 
 .idea
-qiniu.cfg
-mongo.cfg
+*.cfg
 *.yaml
-
-conf/dhaulagiri.yaml
-conf/mongo.yaml
-conf/solr.yaml

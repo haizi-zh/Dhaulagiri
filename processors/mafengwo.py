@@ -4,9 +4,9 @@ import json
 import logging
 from lxml import etree
 import re
-from hashlib import md5
+from datetime import timedelta
+from datetime import datetime
 from lxml.sax import ElementTreeContentHandler
-import datetime
 
 from lxml.etree import XMLSyntaxError
 import pysolr
@@ -15,9 +15,10 @@ from scrapy import Selector
 from processors import BaseProcessor
 from processors.youji_mixin import MfwDomTreeProc
 from utils import haversine
-from utils.database import get_mongodb, get_solr
-from utils.mixin import BaiduSuggestion, MfwSuggestion
 
+from utils.database import get_mongodb, get_solr
+from hashlib import md5
+from utils.mixin import BaiduSuggestion, MfwSuggestion
 
 __author__ = 'zephyre'
 

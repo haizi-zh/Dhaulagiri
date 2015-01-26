@@ -1,5 +1,6 @@
 # coding=utf-8
 import pysolr
+from utils import load_config
 from utils import load_yaml
 
 __author__ = 'zephyre'
@@ -107,13 +108,26 @@ def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost'
 
 
 def get_solr(profile):
+    """
+    Get solr connection.
+
+    :param profile:
+    :return:
+    """
+    cached = getattr(get_solr, 'cached', {})
+
+    if profile in cached:
+        return cached[profile]
+
     cfg = load_yaml()
     section = filter(lambda v: v['profile'] == profile, cfg['solr'])[0]
 
-    host = section.get('host')
-    port = section.get('port')
-    collection = section.get('collection')
-    # solr配置
-    solr_s = pysolr.Solr('http://%s:%s/solr/%s' % (host, port, collection))
+    host = section.get('host', 'localhost')
+    port = int(section.get('port', '27017'))
+    collection = section['collection']
+    client = pysolr.Solr('http://%s:%d/solr/%s' % (host, port, collection))
 
-    return solr_s
+    cached[profile] = client
+    setattr(get_mongodb, 'cached', cached)
+
+    return client
