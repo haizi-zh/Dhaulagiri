@@ -8,6 +8,8 @@ from datetime import timedelta
 from datetime import datetime
 from lxml.sax import ElementTreeContentHandler
 from hashlib import md5
+import StringIO
+from bson import ObjectId
 
 import gevent
 from lxml.etree import XMLSyntaxError
@@ -701,25 +703,49 @@ class NoteSolr(BaseProcessor):
         # 判断是百度游记还是蚂蜂窝游记
         for tmp in item['source']:
             note_id = item['source'][tmp]['id']
+            source = u'蚂蜂窝' if str(tmp) == 'mafengwo' else u'百度'
+
+        tmp_locality_list = item['localityList'] if 'localityList' in item else None
+        tmp_viewspot_list = item['viewSpotList'] if 'viewSpotList' in item else None
+        tmp_covers = item['images'] if 'images' in item else None
+
+        localityList = [tmp['zhName'] for tmp in tmp_locality_list] if tmp_locality_list else None
+        viewSpotList = [tmp['zhName'] for tmp in tmp_viewspot_list] if tmp_viewspot_list else None
+        covers = [tmp['key'] for tmp in tmp_covers] if tmp_covers else None
+
         # data数据
         data = {'id': str(item['_id']),
                 'title': item['title'],
-                'note_id': note_id
+                'source': source,
+                'noteId': note_id,
+                'authorName': item['authorName'] if 'authorName' in item else None,
+                'authorAvatar': item['authorAvatar'] if 'authorAvatar' in item else None,
+                'publishTime': item['publishTime'] if 'publishTime' in item else None,
+                'travelTime': item['travelTime'] if 'travelTime' in item else None,
+                'covers': covers,
+                'lowerCost': item['lowerCost'] if 'lowerCost' in item else None,
+                'upperCost': item['upperCost'] if 'upperCost' in item else None,
+                'months': item['months'] if 'months' in item else None,
+                'essence': item['essence'] if 'essence' in item else None,
+                'authorId': item['authorId'] if 'authorId' in item else None,
+                'localityList': localityList,
+                'viewSpotList': viewSpotList
         }
         # 游记正文文本抽取
-        content_list = []
+        text = []
         for node in contents:
+            # 消除bug Opening and ending tag mismatch
             try:
-                tmp_text_list = etree.fromstring(node['content']).xpath('//text()')
+                tmp_tree = etree.HTML(node['content']).xpath('//div')
             except XMLSyntaxError, e:
-                self.log('note_id %s ,error: %s' % (note_id, e.message))
+                self.log('nid:%s;error:%s' % (note_id, e.message))
                 continue
-            tmp_text_list = filter(lambda val: re.search(r'[\s|-]', val) is None, tmp_text_list)
-            cnt_text = ''.join(tmp_text_list)
-            if node['title']:
-                cnt_text = '%s:% s' % (node['title'], cnt_text)
-            content_list.append(cnt_text)
-        data['contents'] = ';'.join(content_list)
+            for tmp in tmp_tree[0].itertext():
+                if tmp.strip():
+                    text.append(tmp.strip())
+        tmp_text = ''.join(text)
+        data['summary'] = '...%s...' % tmp_text[0:150]
+        data['contents'] = tmp_text
         if data['contents']:
             return data
         else:
@@ -734,8 +760,7 @@ class NoteSolr(BaseProcessor):
                 # 处理item
                 data = self.get_data(entry)
                 if data:
-                    doc = [{'id': data['id'], 'note_id': data['note_id'], 'title': data['title'],
-                            'contents': data['contents']}]
+                    doc = [data]
                     try:
                         solr_s.add(doc)
                     except pysolr.SolrError, e:
@@ -744,22 +769,105 @@ class NoteSolr(BaseProcessor):
             self.add_task(func)
 
 
-class NoteCombiner(BaseProcessor):
-    name = 'note_comb'
+class ViewSpotSolr(BaseProcessor):
+    name = 'vs_solr'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=0, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
+        return parser.parse_args()
+
+    def get_data(self, item):
+        image = item['images'] if 'images' in item else None
+        image_list = []
+        if image:
+            image_list = [tmp['key'] for tmp in image]
+        data = {
+            'id': str(item['_id']),
+            'zhName': item['zhName'] if 'zhName' in item else None,
+            'desc': item['desc'] if 'desc' in item else None,
+            'alias': item['alias'] if 'alias' in item else None,
+            'images': image_list,
+            'abroad': item['abroad'] if 'abroad' in item else None,
+            'enName': item['enName'] if 'enName' in item else None
+        }
+        return data
 
     def populate_tasks(self):
-        b_col = get_mongodb('travelnote', 'BaiduNoteMain', 'mongo')
-        m_col = get_mongodb('travelnote', 'MafengwoNote', 'mongo')
-        b_cursor = b_col.find()
-        for item in b_cursor:
-            def func(entry=item):
-                m_col.update({'_id': entry['_id']}, {'$set': entry}, upsert=True)
+        col = get_mongodb('poi', 'ViewSpot', 'mongo')
+        solr_s = get_solr('viewspot')
+        for entry in col.find().batch_size(20):
+            def func(item=entry):
+                data = self.get_data(item)
+                if data:
+                    doc = [data]
+                    try:
+                        solr_s.add(doc)
+                    except pysolr.SolrError, e:
+                        self.log('error:%s,id:%s' % (e.message, data['id']))
 
             self.add_task(func)
 
 
+class MafengwoAbs(BaseProcessor):
+    name = "mfw_abs"
 
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
 
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=0, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
+        return parser.parse_args()
+
+    # TODO 抽取摘要
+    def proc_abs(self, item):
+        source = item['source']
+        # 针对蚂蜂窝的数据进行处理，添加摘要
+        if 'mafengwo' in source:
+            note_id = source['mafengwo']['id']
+            # 游记正文
+            contents = item['contents'] if 'contents' in item else None
+            if contents:
+                content = contents[0]['content']
+                # 抽取全部的文本，截取摘要
+                try:
+                    node = etree.HTML(content).xpath('//div')
+                except XMLSyntaxError, e:
+                    self.log('nid:%s;error:%s' % (note_id, e.message))
+                    return None
+
+                text = []
+                for tmp in node[0].itertext():
+                    if tmp.strip():
+                        text.append(tmp.strip())
+                tmp_text = ''.join(text)
+                # 截取200个字符
+                abs_text = tmp_text[0:200]
+                # 处理abs_text,替换其中的\n\r等
+                abs_text = re.sub(r'\s+', '', abs_text)
+                item['summary'] = '...%s...' % abs_text
+            else:
+                return None
+        return item
+
+    def populate_tasks(self):
+        col = get_mongodb('travelnote', 'TravelNote', 'mongo')
+        for entry in col.find():
+            def func(item=entry):
+                data = self.proc_abs(item)
+                if data:
+                    col.update({'_id': data['_id']}, {'$set': data}, upsert=True)
+                else:
+                    pass
+
+            self.add_task(func)
