@@ -227,6 +227,7 @@ class QunarProc(BaseProcessor):
         # 问题处理
         question_data['source'] = 'qunar_%s' % q_id
         question_data['title'] = item['title'] if 'title' in item else None
+
         root = etree.HTML(body)
         # 用户名
         authname_root = root.xpath('//div[contains(@id,"post")]//td[@class="pls"]//div[@class="pi"]//a')
@@ -262,7 +263,7 @@ class QunarProc(BaseProcessor):
             tmp_body = entry['body'] if 'body' in entry else None
             if tmp_body:
                 # 判断是否进行交互，存在交互不进行处理
-                root = etree.HTML(body)
+                root = etree.HTML(tmp_body)
                 quote_root = root.xpath(
                     '//div[contains(@id,"post")]//td[@class="plc"]//div[@class="pct"]//td[@class="t_f"]/div[@class="quote"]')
                 if quote_root:
@@ -273,14 +274,15 @@ class QunarProc(BaseProcessor):
                     data['source'] = 'qunar_%s' % post_id
                     # 提问的id
                     q_id = entry['q_id']
-                    data['qId'] = q_id
+                    data['qId'] = 'qunar_%s' % q_id
                     # 用户名
                     authname_root = root.xpath('//div[contains(@id,"post")]//td[@class="pls"]//div[@class="pi"]//a')
-                    authorName = authname_root[0].text
+                    sub_authorName = authname_root[0].text
+                    self.log('authorName:%s' % authorName)
                     # 用户头像
                     authavatar_root = root.xpath(
                         '//div[contains(@id,"post")]//td[@class="pls"]//div[@class="avatar"]//img')
-                    authorAvatar = authavatar_root[0].attrib['src']
+                    sub_authorAvatar = authavatar_root[0].attrib['src']
                     # 获取问题内容
                     content_root = root.xpath(
                         '//div[contains(@id,"post")]//td[@class="plc"]//div[@class="pct"]//td[@class="t_f"]')
@@ -288,21 +290,22 @@ class QunarProc(BaseProcessor):
                     for tmp in content_root[0].itertext():
                         if tmp.strip():
                             text.append(tmp.strip())
-                    contents = ''.join(text)
+                    sub_contents = ''.join(text)
                     # 发表时间
                     publish_time_root = root.xpath(
                         '//div[contains(@id,"post")]//td[@class="plc"]//div[@class="pi"]//div[@class="authi"]/em/span')
-                    publish_time = publish_time_root[0].attrib['title']
-                    publishTime = long(
-                        time.mktime(time.strptime(publish_time, '%Y-%m-%d %H:%M:%S')) * 1000) if publish_time else None
-                    data['authorName'] = authorName
-                    data['authorAvatar'] = authorAvatar
-                    data['contents'] = contents
-                    data['publishTime'] = publishTime
+                    sub_publish_time = publish_time_root[0].attrib['title']
+                    sub_publishTime = long(
+                        time.mktime(
+                            time.strptime(sub_publish_time, '%Y-%m-%d %H:%M:%S')) * 1000) if sub_publish_time else None
+                    data['authorName'] = sub_authorName
+                    data['authorAvatar'] = sub_authorAvatar
+                    data['contents'] = sub_contents
+                    data['publishTime'] = sub_publishTime
                     # 填加回答
                     answer_list.append(data)
 
-        return {'question': question_data, 'answer': answer_list}
+        return {'question_data': question_data, 'answer_list': answer_list}
 
     def populate_tasks(self):
         raw_ques_col = get_mongodb('raw_faq', 'QunarQuestion', 'mongo-raw')
