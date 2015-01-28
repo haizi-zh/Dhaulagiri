@@ -1,3 +1,4 @@
+# coding=utf-8
 from processors import BaseProcessor
 from utils import load_yaml
 from utils.database import get_mongodb
@@ -54,6 +55,49 @@ class SetAdder(BaseMerger):
                 target[f] = list(data)
 
 
+class ImageMerger(BaseMerger):
+    def process(self, source, target):
+        if 'isDone' in target and target['isDone']:
+            return
+
+        if 'images' in source and source['images']:
+            target['images'] = source['images']
+
+
+class ExceptFieldsMerger(BaseMerger):
+    """
+    除了某些fields以外，剩下的一律覆盖
+    """
+
+    def process(self, source, target):
+        for k, v in source.items():
+            # 除了几种特殊情况以外，一律覆盖
+            if k == 'images' and 'isDone' in target and target['isDone']:
+                continue
+            elif k in self.fields and 'isEdited' in target and target['isEdited'] and k in target and target[k]:
+                continue
+            if k == '_id':
+                continue
+
+            target[k] = source[k]
+
+
+class EditorMerger(BaseMerger):
+    """
+    处理一些可能已经被编辑修改的字段
+    """
+
+    def process(self, source, target):
+        for f in self.fields:
+            if f not in source or not source[f]:
+                continue
+
+            if 'isEdited' in target and target['isEdited'] and f in target and target[f]:
+                continue
+
+            target[f] = source[f]
+
+
 class BaiduMergeProcessor(BaseProcessor):
     name = 'baidu-merger'
 
@@ -62,17 +106,89 @@ class BaiduMergeProcessor(BaseProcessor):
 
         self.args = self.args_builder()
 
+        # 初始化merger
+        self.mergers = []
+        merger_rules = load_yaml()['merger']
+
+        name_list = self.args.merger if self.args.merger else [
+            'LocalityAppender' if self.args.type == 'mdd' else 'PoiAppender', 'SetAdder', 'Overwriter', 'ImageMerger',
+            'EditorMerger']
+
+        for name in name_list:
+            rule = merger_rules[name]
+            m = globals()[rule['class']]()
+
+            if 'fields' in rule and rule['fields']:
+                m.add_fields(rule['fields'])
+
+            if 'priority' in rule:
+                m.priority = rule['priority']
+
+            self.mergers.append(m)
+        self.mergers = sorted(self.mergers, key=lambda v: v.priority)
+
     def args_builder(self):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
-        parser.add_argument('--merger', nargs='*', required=True)
+        parser.add_argument('--merger', nargs='*')
         parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
-        return parser.parse_args()
+        args, leftover = parser.parse_known_args()
+        return args
+
+    @staticmethod
+    def resolve_targets(data):
+        """
+        将baidu sid解析为相应的object ID
+        :param entry:
+        :param data:
+        :return:
+        """
+        if 'locList' not in data:
+            return
+
+        col_country = get_mongodb('geo', 'Country', 'mongo')
+        col_mdd = get_mongodb('geo', 'Locality', 'mongo')
+
+        def func(loc_list):
+            """
+            顺序查找loc_list中的项目。如果有命中的，则返回。
+            :param col:
+            :param loc_list:
+            :return:
+            """
+            target_list = []
+            country = None
+            country_flag = True
+
+            for item in loc_list:
+                if country_flag:
+                    ret = col_country.find_one({'alias': item['sname']}, {'zhName': 1, 'enName': 1})
+                else:
+                    ret = col_mdd.find_one({'source.baidu.id': item['sid']}, {'zhName': 1, 'enName': 1})
+                if not ret:
+                    continue
+
+                if country_flag:
+                    country = ret
+                    country_flag = False
+
+                target_list.append(ret)
+
+            return country, target_list
+
+        country, target_list = func(data.pop('locList'))
+        if country:
+            data['country'] = country
+            data['abroad'] = country['zhName'] not in [u'中国', u'澳门', u'香港', u'台湾']
+        else:
+            data['abroad'] = None
+        if target_list:
+            data['locList'] = target_list
 
     def populate_tasks(self):
-        col_src, db_tar, col_tar = ('BaiduLocality', 'geo', 'Locality') if self.args.type == 'mdd' else (
-            'BaiduPoi', 'poi', 'ViewSpot')
+        col_src, db_tar, col_tar = ('BaiduLocality', 'geo', 'LocalityTransfer') if self.args.type == 'mdd' else (
+            'BaiduPoi', 'poi', 'ViewSpotTransfer')
         col = get_mongodb('proc_baidu', col_src, profile='mongo-raw')
 
         col_target = get_mongodb(db_tar, col_tar, profile='mongo')
@@ -82,37 +198,23 @@ class BaiduMergeProcessor(BaseProcessor):
         if self.args.limit:
             cursor.limit(self.args.limit)
 
-        mergers = []
-        merger_rules = load_yaml()['merger']
-
-        for name in self.args.merger:
-            rule = merger_rules[name]
-            m = globals()[rule['class']]()
-
-            m.add_fields(rule['fields'])
-            if 'priority' in rule:
-                m.priority = rule['priority']
-            mergers.append(m)
-        mergers = sorted(mergers, key=lambda v: v.priority)
-
         for val in cursor:
             def func(entry=val):
+                surl = entry['source']['baidu']['surl'] if 'surl' in entry['source']['baidu'] else ''
                 self.log(u'Processing: zhName=%s, sid=%s, surl=%s' % (entry['zhName'], entry['source']['baidu']['id'],
-                                                                      entry['source']['baidu']['surl']))
-                target = col_target.find_one({'isEdited': {'$ne': True},
-                                              'source.baidu.id': entry['source']['baidu']['id']})
-                if not target and 'mafengwo' in entry['source']:
-                    target = col_target.find_one({'isEdited': {'$ne': True},
-                                                  'source.mafengwo.id': entry['source']['mafengwo']['id']})
+                                                                      surl))
+                self.resolve_targets(entry)
+                target = col_target.find_one({'source.baidu.id': entry['source']['baidu']['id']})
                 if not target:
-                    return
+                    target = {}
 
-                self.log(u'Merging: zhName=%s, sid=%s, surl=%s' % (entry['zhName'], entry['source']['baidu']['id'],
-                                                                   entry['source']['baidu']['surl']))
-                for m in mergers:
+                for m in self.mergers:
                     m.process(entry, target)
 
-                col_target.save(target)
+                if target:
+                    target['taoziEna'] = True
+                    target['lxpEna'] = True
+                    col_target.save(target)
 
             self.add_task(func)
 
