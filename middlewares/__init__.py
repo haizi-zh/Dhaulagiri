@@ -19,7 +19,7 @@ class MiddlewareManager(object):
 
         for mw_type in ['download']:
             mw_list = []
-            for mw in self.engine.settings['middlewares'][mw_type]:
+            for mw in self.engine.settings['middlewares'][mw_type] if 'middlewares' in self.engine.settings else []:
                 try:
                     ret = mw['name'].split('.')
                     module_path = '.'.join(ret[:-1])
