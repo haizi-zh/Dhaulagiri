@@ -194,7 +194,7 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
-    def get(self, url, retry=5, user_data=None, **kwargs):
+    def get(self, url, retry=10, user_data=None, **kwargs):
         from requests import Request, Session
 
         for idx in xrange(retry):
@@ -205,8 +205,6 @@ class RequestHelper(object):
                               auth=kwargs['auth'] if 'auth' in kwargs else None,
                               cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
                 prepped = req.prepare()
-                if user_data:
-                    setattr(prepped, 'user_data', user_data)
 
                 s = Session()
                 s_args = {}
@@ -239,14 +237,16 @@ class RequestHelper(object):
                 success = True
                 for entry in mw_list:
                     mw = entry['middleware']
-                    ret = mw.on_response(response)
+                    ret = mw.on_response(response, user_data=user_data)
                     response = ret['value']
                     pass_next = ret['next']
                     success = ret['success']
                     if not pass_next:
                         break
+
                 if success:
                     return response
+
             except IOError as e:
                 # 最多尝试次数：retry
                 if idx < retry - 1:
