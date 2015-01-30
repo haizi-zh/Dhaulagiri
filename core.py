@@ -157,8 +157,8 @@ class ProcessorEngine(LoggerMixin):
 
         self.arg_parser = parser
 
-        self.middleware_manager = MiddlewareManager.from_engine(self)
         self.request = RequestHelper.from_engine(self)
+        self.middleware_manager = MiddlewareManager.from_engine(self)
 
         self.processor_store = self.reg_processors()
         self.processors = {}
@@ -194,7 +194,7 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
-    def get(self, url, retry=5, **kwargs):
+    def get(self, url, retry=5, user_data=None, **kwargs):
         from requests import Request, Session
 
         for idx in xrange(retry):
@@ -205,11 +205,15 @@ class RequestHelper(object):
                               auth=kwargs['auth'] if 'auth' in kwargs else None,
                               cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
                 prepped = req.prepare()
+                if user_data:
+                    setattr(prepped, 'user_data', user_data)
 
                 s = Session()
                 s_args = {}
 
-                if 'download' in self._engine.middleware_manager.mw_dict:
+                mw_manager = getattr(self._engine, 'middleware_manager', {})
+
+                if mw_manager and 'download' in mw_manager.mw_dict:
                     mw_list = self._engine.middleware_manager.mw_dict['download']
                 else:
                     mw_list = []
@@ -232,20 +236,24 @@ class RequestHelper(object):
                             break
                     raise e
 
+                success = True
                 for entry in mw_list:
                     mw = entry['middleware']
                     ret = mw.on_response(response)
                     response = ret['value']
                     pass_next = ret['next']
+                    success = ret['success']
                     if not pass_next:
                         break
-
-                return response
+                if success:
+                    return response
             except IOError as e:
                 # 最多尝试次数：retry
                 if idx < retry - 1:
                     continue
                 else:
                     raise e
+
+        return None
 
 
