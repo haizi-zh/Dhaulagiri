@@ -1,3 +1,4 @@
+# coding=utf-8
 __author__ = 'zephyre'
 
 
@@ -70,6 +71,16 @@ class ProxyMiddleware(DownloadMiddleware):
 
     max_error = 5
 
+    def load_proxies(self):
+        response = self._manager.engine.request.get('http://api.taozilvxing.cn/core/misc/proxies?'
+                                                    'verifier=all&latency=2&pageSize=500&recently=24')
+
+        def func(entry):
+            proxy = '%s://%s:%d' % (entry['scheme'], entry['host'], entry['port'])
+            return proxy, {'failCnt': 0, 'reqCnt': 0}
+
+        return dict(map(func, filter(lambda v: not v['user'], response.json()['result'])))
+
     def __init__(self, manager):
         DownloadMiddleware.__init__(self, manager)
 
@@ -79,13 +90,7 @@ class ProxyMiddleware(DownloadMiddleware):
         if not args.proxy:
             raise RuntimeError
 
-        proxy_dict = {}
-
-        for entry in manager.engine.settings['proxies']:
-            proxy_name = 'http://%s:%d' % (entry['host'], entry['port'])
-            proxy_dict[proxy_name] = {'failCnt': 0, 'reqCnt': 0}
-
-        self.proxies = proxy_dict
+        self.proxies = self.load_proxies()
         self.dead_proxies = {}
 
     def __fetch(self):
@@ -115,43 +120,56 @@ class ProxyMiddleware(DownloadMiddleware):
 
     def drop_proxy(self, proxy_name):
         if proxy_name in self.proxies:
-            self.proxies[proxy_name]['failCnt'] += 1
-            if self.proxies[proxy_name]['failCnt'] > self.max_error:
-                self._manager.engine.logger.warn('Disable proxy: %s (request count: %d)' %
-                                                 (proxy_name, self.proxies[proxy_name]['reqCnt']))
-                p = self.proxies.pop(proxy_name)
-                self.dead_proxies[proxy_name] = p
-                self._manager.engine.logger.info(
-                    'Available proxies: %d, disabled proxies: %d' % (len(self.proxies), len(self.dead_proxies)))
+            self._manager.engine.logger.warn('Disable proxy: %s' % proxy_name)
+            p = self.proxies.pop(proxy_name)
+            self.dead_proxies[proxy_name] = p
+            self._manager.engine.logger.info(
+                'Available proxies: %d, disabled proxies: %d' % (len(self.proxies), len(self.dead_proxies)))
+
+    def add_fail_cnt(self, proxy_name):
+        if proxy_name not in self.proxies:
+            return
+
+        self.proxies[proxy_name]['failCnt'] += 1
+        self._manager.engine.logger.debug(
+            'Proxy: %s failCnt added to %d' % (proxy_name, self.proxies[proxy_name]['failCnt'] ))
+        if self.proxies[proxy_name]['failCnt'] > self.max_error:
+            self.drop_proxy(proxy_name)
 
     def on_failure(self, request, s_args):
         if 'proxies' in s_args:
-            self.drop_proxy(s_args['proxies']['http'])
+            self.add_fail_cnt(s_args['proxies']['http'])
 
         return True
 
-    def on_response(self, response):
-        result = {'next': True, 'value': response}
+    @staticmethod
+    def default_validator(response):
+        """
+        默认的response验证器，通过判断HTTP status code来确定代理是否有效
 
-        success = response.status_code in [200, 301, 302, 304]
+        :param response:
+        :return:
+        """
+        return response.status_code in [200, 301, 302, 304]
+
+    def on_response(self, response, user_data=None):
+        result = {'next': True, 'value': response, 'success': True}
+
+        try:
+            validator = user_data['ProxyMiddleware']['validator'] if user_data else {}
+            success = validator(response)
+        except KeyError:
+            success = self.default_validator(response)
+        result['success'] = success
 
         tmp = response.connection.proxy_manager.keys()
-        if not tmp:
-            return result
-
-        proxy_name = tmp[0]
-
-        if proxy_name in self.proxies:
+        if tmp and tmp[0] in self.proxies:
+            proxy_name = tmp[0]
             if success:
                 self.proxies[proxy_name]['failCnt'] = 0
             else:
-                self.proxies[proxy_name]['failCnt'] += 1
-                if self.proxies[proxy_name]['failCnt'] > self.max_error:
-                    self._manager.engine.logger.warn('Disable proxy: %s (request count: %d)' %
-                                                     (proxy_name, self.proxies[proxy_name]['reqCnt']))
-                    p = self.proxies.pop(proxy_name)
-                    self.dead_proxies[proxy_name] = p
-                    self._manager.engine.logger.info(
-                        'Available proxies: %d, disabled proxies: %d' % (len(self.proxies), len(self.dead_proxies)))
+                self._manager.engine.logger.debug('Proxy: %s failed in validation' % proxy_name)
+                self.add_fail_cnt(proxy_name)
+                result['next'] = False
 
         return result
