@@ -1,7 +1,9 @@
 # coding=utf-8
 import types
+
 import conf
 from utils import load_yaml
+
 
 __author__ = 'zephyre'
 
@@ -52,7 +54,7 @@ def reg_processors(proc_dir=None):
                 raise
 
 
-def main():
+def test():
     parser = argparse.ArgumentParser()
     parser.add_argument('cmd')
     args, leftovers = parser.parse_known_args()
@@ -67,6 +69,20 @@ def main():
         proc.run()
     else:
         print 'No processor found for: %s' % args.cmd
+
+
+def main():
+    from core import ProcessorEngine
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('cmd', type=str)
+    args, leftovers = parser.parse_known_args()
+
+    engine = ProcessorEngine.get_instance()
+
+    engine.add_processor(args.cmd)
+
+    engine.start()
 
 
 if __name__ == '__main__':

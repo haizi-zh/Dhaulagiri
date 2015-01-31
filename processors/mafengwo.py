@@ -3,15 +3,15 @@
 import json
 import logging
 import re
-
-import gevent
-from lxml.sax import ElementTreeContentHandler
-from processors import BaseProcessor, runproc
-from utils import haversine
-
-from utils.database import get_mongodb
 from hashlib import md5
-from utils.mixin import BaiduSuggestion
+
+from lxml.sax import ElementTreeContentHandler
+
+from processors import BaseProcessor
+from utils import haversine
+from utils.database import get_mongodb
+from utils.mixin import BaiduSuggestion, MfwSuggestion
+
 
 __author__ = 'zephyre'
 
@@ -45,8 +45,11 @@ class MfwImageExtractor(object):
                 return ret
 
 
-class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
-    name = 'mfw-poi-comment'
+class SuggestionProcessor(BaseProcessor):
+    """
+    读取蚂蜂窝的输入提示
+    """
+    name = 'mfw-sug'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -56,30 +59,126 @@ class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
-        return parser.parse_args()
+        parser.add_argument('--query', type=str)
+        args, leftover = parser.parse_known_args()
+        return args
 
-    @runproc
-    def run(self):
+    def populate_tasks(self):
+        from urllib import quote
+
+        col_raw1 = get_mongodb('raw_baidu', 'BaiduPoi', 'mongo-raw')
+        col_raw2 = get_mongodb('raw_baidu', 'BaiduLocality', 'mongo-raw')
+
+        col = get_mongodb('raw_mfw', 'MfwSug', 'mongo-raw')
+
+        query = json.loads(self.args.query) if self.args.query else {}
+
+        for col_raw in [col_raw1, col_raw2]:
+            cursor = col_raw.find(query, {'ambiguity_sname': 1, 'sname': 1, 'sid': 1}).skip(self.args.skip)
+            if self.args.limit:
+                cursor.limit(self.args.limit)
+
+            for val in cursor:
+                def func(entry=val):
+
+                    for name in set(filter(lambda v: v.strip(), [entry[k] for k in ['ambiguity_sname', 'sname']])):
+                        self.log(u'Parsing: %s, id=%s' % (name, entry['sid']))
+
+                        url = 'http://www.mafengwo.cn/group/ss.php?callback=j&key=%s' % quote(name.encode('utf-8'))
+                        key = md5(url).hexdigest()
+
+                        if col.find_one({'key': key}, {'_id': 1}):
+                            # The record already exists
+                            self.log(u'Already exists, skipping: %s, id=%s' % (name, entry['sid']))
+                            continue
+
+                        response = self.request.get(url)
+                        if not response:
+                            self.log(u'Failed to query url: %s, %s, id=%s' % (url, name, entry['sid']), logging.ERROR)
+                            continue
+
+                        col.update({'key': key}, {'key': key, 'body': response.text, 'name': name, 'url': url},
+                                   upsert=True)
+
+                self.add_task(func)
+
+
+class PoiCommentProcessor(BaseProcessor, MfwImageExtractor):
+    """
+    清洗蚂蜂窝的POI评论数据
+    """
+    name = 'mfw-poi-comment'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        MfwImageExtractor.__init__(self)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        args, leftover = parser.parse_known_args()
+        return args
+
+    def populate_tasks(self):
         col = get_mongodb('raw_mfw', 'MafengwoComment', 'mongo-raw')
+        col_vs = get_mongodb('poi', 'ViewSpot', 'mongo')
+        col_dining = get_mongodb('poi', 'Restaurant', 'mongo')
+        col_shopping = get_mongodb('poi', 'Shopping', 'mongo')
 
         cursor = col.find({}, snapshot=True)
         cursor.skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
 
-        print '%d documents to process...' % cursor.count(with_limit_and_skip=True)
+        poi_dict = {}
 
-        jobs = []
-        for entry in cursor:
-            jobs.append(gevent.spawn(self.parse, entry))
+        for val in cursor:
+            def func(entry=val):
+                poi_dbs = {'vs': col_vs, 'dining': col_dining, 'shopping': col_shopping}
 
-        gevent.joinall(jobs)
+                def fetch_poi_item(mfw_id, poi_type):
+                    if mfw_id in poi_dict:
+                        return poi_dict[mfw_id]
+                    else:
+                        col_poi = poi_dbs[poi_type]
+                        tmp = col_poi.find_one({'source.mafengwo.id': mfw_id}, {'_id': 1})
+                        if tmp:
+                            ret = {'type': poi_type, 'item_id': tmp['_id']}
+                        else:
+                            self.log('Failed to find POI: %d' % entry['poi_id'], logging.DEBUG)
+                            ret = None
+                        poi_dict[mfw_id] = ret
+                        return ret
+
+                ret = None
+                for v in ['vs', 'dining', 'shopping']:
+                    ret = fetch_poi_item(entry['poi_id'], v)
+                    if ret:
+                        break
+
+                if not ret:
+                    return
+
+                self.log('Parsing comment for %s: %s(%d)' % (ret['type'], ret['item_id'], entry['poi_id']))
+                for item_type, item_data in self.parse_contents(entry['contents']):
+                    if item_type != 'image':
+                        item_data['source'] = {'mafengwo': {'id': entry['comment_id']}}
+                        item_data['type'] = ret['type']
+                        item_data['itemId'] = ret['item_id']
+
+                    self.update(item_type, item_data)
+
+            self.add_task(func)
 
 
     @staticmethod
     def update(item_type, item_data):
         if item_type == 'comment':
-            col = get_mongodb('misc', 'Comment', 'mongo')
+            db_dict = {'vs': 'ViewSpotComment', 'dining': 'DiningComment', 'shopping': 'ShoppingComment'}
+            db_name = db_dict[item_data.pop('type')]
+            col = get_mongodb('comment', db_name, 'mongo')
             col.update({'source.mafengwo.id': item_data['source']['mafengwo']['id']}, {'$set': item_data}, upsert=True)
         elif item_type == 'image':
             col = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
@@ -189,7 +288,7 @@ class MfwHtmlHandler(ElementTreeContentHandler):
         ElementTreeContentHandler.startElementNS(self, ns_name, qname, attributes)
 
 
-class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
+class MafengwoProcessor(BaseProcessor, BaiduSuggestion, MfwSuggestion):
     """
     马蜂窝目的地的清洗
 
@@ -215,8 +314,10 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=int)
-        parser.add_argument('--baidu', action='store_true')
-        return parser.parse_args()
+        parser.add_argument('--baidu-match', action='store_true')
+        parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
+        args, leftover = parser.parse_known_args()
+        return args
 
     @staticmethod
     def is_chn(text):
@@ -347,8 +448,10 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
         """
         from lxml import etree
 
-        plain_list = [''.join(etree.fromstring(body, parser=etree.HTMLParser()).itertext()).strip() for body
-                      in
+        if not hasattr(body_list, '__iter__'):
+            body_list = [body_list]
+
+        plain_list = [''.join(etree.fromstring(body, parser=etree.HTMLParser()).itertext()).strip() for body in
                       body_list]
 
         return '\n\n'.join(plain_list) if plain_list else None
@@ -357,6 +460,9 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
     def get_html(body_list):
         from lxml import etree
         import lxml.sax
+
+        if not hasattr(body_list, '__iter__'):
+            body_list = [body_list]
 
         proc_list = []
 
@@ -380,6 +486,47 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
             return '<div>%s</div>' % '\n'.join(proc_list) if len(proc_list) > 1 else proc_list[0]
         else:
             return None
+
+    def parse_vs_contents(self, entry, data):
+        """
+        解析POI的详细内容
+        :param entry:
+        :param data:
+        :return:
+        """
+        desc = None
+        address = None
+        tel = None
+        traffic = None
+        misc = []
+        en_name = None
+
+        for info_entry in entry['desc']:
+            if info_entry['name'] == u'简介':
+                desc = self.get_plain(info_entry['contents'])
+            elif info_entry['name'] == u'地址':
+                address = self.get_plain(info_entry['contents'])
+            elif info_entry['name'] == u'英文名称':
+                en_name = self.get_plain(info_entry['contents'])
+            elif info_entry['name'] == u'电话':
+                tel = self.get_plain(info_entry['contents'])
+            elif info_entry['name'] == u'交通':
+                traffic = self.get_plain(info_entry['contents'])
+            else:
+                misc.append('%s\n\n%s' % (info_entry['name'], self.get_plain(info_entry['contents'])))
+
+        if desc:
+            data['desc'] = desc
+        if misc:
+            data['details'] = '\n\n'.join(misc)
+        if address:
+            data['address'] = address
+        if tel:
+            data['tel'] = tel
+        if traffic:
+            data['trafficInfo'] = traffic
+        if en_name:
+            data['enName'] = en_name
 
     def parse_mdd_contents(self, entry, data):
         """
@@ -445,20 +592,87 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
         if specials:
             data['specials'] = specials
 
+    def retrieve_loc(self, mfw_id):
+        """
+        有些数据在抓取的时候，没有抓到经纬度。补齐
+
+        :param mfw_type:
+        :param mfw_id:
+        :return:
+        """
+        col = get_mongodb('raw_mfw', 'MfwMddBody', 'mongo-raw')
+        ret = col.find_one({'key': mfw_id}, {'body': 1})
+        if ret:
+            body = ret['body']
+        else:
+            self.logger.debug('Cache missed for mdd: %d' % mfw_id)
+            url = ''
+            try:
+                url = 'http://www.mafengwo.cn/travel-scenic-spot/mafengwo/%d.html' % mfw_id
+                response = self.engine.request.get(url)
+                body = response.text
+                col.update({'key': mfw_id}, {'key': mfw_id, 'body': body}, upsert=True)
+            except IOError:
+                self.logger.error('Error downloading %s' % url)
+                return
+
+        # 网页格式分两种情况：
+        # 1. 普通：http://www.mafengwo.cn/jd/10035/gonglve.html
+        # 2. 重点目的地：http://www.mafengwo.cn/travel-scenic-spot/mafengwo/11025.html
+
+        from lxml import etree
+
+        tree = etree.fromstring(body, etree.HTMLParser())
+
+        lat = None
+        lng = None
+        for tmp in tree.xpath('//script[@type="text/javascript"]/text()'):
+            m = re.search(r'^\s*var\s+mdd_center(.+$)', tmp, re.M)
+            if not m:
+                continue
+            m_lat = re.search(r"lat:parseFloat\('(\d+.\d+)'\)", m.group(1))
+            m_lng = re.search(r"lng:parseFloat\('(\d+.\d+)'\)", m.group(1))
+            if m_lat and m_lng:
+                lat = float(m_lat.group(1))
+                lng = float(m_lng.group(1))
+                break
+
+        if not lat or not lng:
+            """
+                    var map = {
+                'zoom' : 0,// || 0,
+                'lat'  : 35.179876820661,
+                'lng'  : 129.07412052155
+            },
+            """
+            for tmp in tree.xpath('//script[@type="text/javascript"]/text()'):
+                m = re.search(r'var\s+map\s+=\s+\{(.+?)\}', tmp, re.S)
+                if not m:
+                    continue
+                m_lat = re.search(r'lat.*?:.*?(\d+\.\d+)', m.group(1))
+                m_lng = re.search(r'lng.*?:.*?(\d+\.\d+)', m.group(1))
+                if m_lat and m_lng:
+                    lat = float(m_lat.group(1))
+                    lng = float(m_lng.group(1))
+                    break
+
+        return {'type': 'Point', 'coordinates': [lng, lat]} if lat and lng else None
+
     def populate_tasks(self):
-        col_raw_mdd = get_mongodb('raw_mfw', 'MafengwoMdd', 'mongo-raw')
+        col_raw = get_mongodb('raw_mfw', 'MafengwoMdd' if self.args.type == 'mdd' else 'MafengwoVs', 'mongo-raw')
         col_raw_im = get_mongodb('raw_mfw', 'MafengwoImage', 'mongo-raw')
         col_country = get_mongodb('geo', 'Country', 'mongo')
-        col_proc_mdd = get_mongodb('proc_mfw', 'MafengwoMdd', 'mongo-raw')
+        col_proc = get_mongodb('proc_mfw', 'MafengwoMdd' if self.args.type == 'mdd' else 'MafengwoVs', 'mongo-raw')
 
-        tot_num = col_raw_mdd.find({}).count()
+        tot_num = col_raw.find({}).count()
 
-        cursor = col_raw_mdd.find(json.loads(self.args.query) if self.args.query else {})
+        cursor = col_raw.find(json.loads(self.args.query) if self.args.query else {})
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
 
-        processor = self
+        # Cache for hotness calculation results
+        hotness_cache = {}
 
         for val in cursor:
             def func(entry=val):
@@ -482,7 +696,8 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
                         alias.add(a)
                 data['alias'] = list(alias)
 
-                data['tags'] = list(set(filter(lambda val: val, [tmp.lower().strip() for tmp in entry['tags']])))
+                if 'tags' in entry:
+                    data['tags'] = list(set(filter(lambda val: val, [tmp.lower().strip() for tmp in entry['tags']])))
 
                 # 热门程度
                 if 'comment_cnt' in entry:
@@ -491,13 +706,17 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
                     data['visitCnt'] = entry['vs_cnt']
 
                 # 计算hotness
-                def hotness(key):
+                def calc_hotness(key):
                     if key not in entry:
                         return 0.5
-                    return col_raw_mdd.find({key: {'$lt': entry[key]}}).count() / float(tot_num)
+                    x = entry[key]
+                    sig = '%s:%d' % (key, x)
+                    if sig not in hotness_cache:
+                        hotness_cache[sig] = col_raw.find({key: {'$lt': x}}).count() / float(tot_num)
+                    return hotness_cache[sig]
 
-                hotness_list = map(hotness, ('comment_cnt', 'images_tot', 'vs_cnt'))
-                data['hotness'] = sum(hotness_list) / float(len(hotness_list))
+                hotness_terms = map(calc_hotness, ('comment_cnt', 'images_tot', 'vs_cnt'))
+                data['hotness'] = sum(hotness_terms) / float(len(hotness_terms))
 
                 crumb_ids = []
                 for crumb_entry in entry['crumb']:
@@ -514,16 +733,29 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
 
                 if 'lat' in entry and 'lng' in entry:
                     data['location'] = {'type': 'Point', 'coordinates': [entry['lng'], entry['lat']]}
+                else:
+                    if self.args.type == 'mdd':
+                        tmp = self.retrieve_loc(entry['id'])
+                        if tmp:
+                            data['location'] = tmp
+                    else:
+                        tmp = self.poi_info(entry['id'])
+                        if tmp:
+                            data['location'] = {'type': 'Point', 'coordinates': [tmp['lng'], tmp['lat']]}
 
                 # 获得对应的图像
                 sig = 'MafengwoMdd-%d' % data['source']['mafengwo']['id']
-                image_list = [{'key': md5(tmp['url']).hexdigest()} for tmp in col_raw_im.find({'itemIds': sig})]
+                image_list = [{'key': md5(tmp['url']).hexdigest()} for tmp in
+                              col_raw_im.find({'itemIds': sig}).limit(10)]
                 if image_list:
                     data['images'] = image_list
 
-                self.parse_mdd_contents(entry, data)
+                if self.args.type == 'mdd':
+                    self.parse_mdd_contents(entry, data)
+                else:
+                    self.parse_vs_contents(entry, data)
 
-                if self.args.baidu:
+                if self.args.baidu_match:
                     if 'location' in data:
                         coords = data['location']['coordinates']
                         ret = self.get_baidu_sug(data['zhName'], coords)
@@ -533,8 +765,10 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
                         for val in ret:
                             val['dist'] = haversine(coords[0], coords[1], val['lng'], val['lat'])
 
-                        ret = filter(lambda val: val['sname'] == data['zhName'] and 5 >= val['type_code'] >= 3
-                                                 and val['dist'] < 400, ret)
+                        ret = filter(lambda val: val['sname'] == data['zhName'] and \
+                                                 (5 >= val['type_code'] >= 3 if self.args.type == 'mdd'
+                                                  else val['type_code'] >= 5)
+                                                 and val['dist'] < 400 if self.args.type == 'mdd' else 200, ret)
                         ret = sorted(ret, key=lambda val: (val['type_code'], val['dist']))
                         if ret:
                             data['source']['baidu'] = {'id': ret[0]['sid'], 'surl': ret[0]['surl']}
@@ -546,7 +780,7 @@ class MafengwoProcessor(BaseProcessor, BaiduSuggestion):
                 self.log('Parsing done: %s / %s / %s' % tuple(data[key] if key in data else None for key in
                                                               ['zhName', 'enName', 'locName']))
 
-                col_proc_mdd.update({'source.mafengwo.id': data['source']['mafengwo']['id']}, {'$set': data},
-                                    upsert=True)
+                col_proc.update({'source.mafengwo.id': data['source']['mafengwo']['id']}, {'$set': data},
+                                upsert=True)
 
             self.add_task(func)

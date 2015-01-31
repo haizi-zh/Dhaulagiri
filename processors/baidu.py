@@ -1,16 +1,18 @@
 # coding=utf-8
+import json
 import logging
 import re
+
 from processors import BaseProcessor
 from utils.database import get_mongodb
 from utils.mixin import MfwSuggestion, BaiduSuggestion
-from utils import mercator2wgs
+
 
 __author__ = 'zephyre'
 
 
-class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
-    name = 'baidu-poi'
+class BaiduSceneProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
+    name = 'baidu-scene'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -21,7 +23,11 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
-        return parser.parse_args()
+        # parser.add_argument('--type', choices=['mdd', 'vs'], required=True)
+        parser.add_argument('--mfw-match', default=False, action='store_true')
+        parser.add_argument('--query', type=str)
+        args, leftover = parser.parse_known_args()
+        return args
 
     def get_type_code(self, entry):
         """
@@ -38,12 +44,7 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 return entry
 
     def match_mfw(self, entry, location):
-        from utils import haversine
-
-        if 'type_code' not in entry:
-            return entry
-
-        scene_type = 'mdd' if entry['type_code'] <= 5 else 'vs'
+        scene_type = 'mdd' if entry['is_locality'] else 'vs'
 
         name_list = []
         for key in ['sname', 'ambiguity_sname']:
@@ -52,19 +53,14 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                 name_list.append(name)
 
         for name in name_list:
-            mfw_sug = self.get_mfw_sug(name, scene_type, None)
-            try:
-                coords = location['coordinates']
-                dist = haversine(mfw_sug[0]['lng'], mfw_sug[0]['lat'], coords[0], coords[1])
-                if dist <= 400:
-                    self.log('Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
-                                                               mfw_sug[0]['id']), logging.INFO)
-                    return {'id': mfw_sug[0]['id'], 'name': mfw_sug[0]['name'], 'type': mfw_sug[0]['type']}
+            mfw_sug = self.get_mfw_sug(name, scene_type, location)
 
-            except (IndexError, KeyError, TypeError):
-                continue
+            if mfw_sug:
+                self.log(u'Matched: %s(%s) <= %s(id=%d)' % (entry['sname'], entry['surl'], mfw_sug[0]['name'],
+                                                            mfw_sug[0]['id']), logging.INFO)
+                return {'id': mfw_sug[0]['id'], 'name': mfw_sug[0]['name'], 'type': mfw_sug[0]['type']}
 
-        self.log('Cannnot match: %s(%s)' % (entry['sname'], entry['surl']), logging.INFO)
+        self.log(u'Cannnot match: %s(%s)' % (entry['sname'], entry['surl']), logging.INFO)
 
     # 通过id拼接图片url
     @staticmethod
@@ -85,8 +81,8 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
     def text_pro(text):
         if text:
             text = filter(lambda val: val, [tmp.strip() for tmp in re.split(r'\n+', text)])
-            tmp_text = ['<p>%s</p>' % tmp for tmp in text]
-            return '<div>%s</div>' % (''.join(tmp_text))
+            tmp_text = [u'<p>%s</p>' % tmp for tmp in text]
+            return u'<div>%s</div>' % (''.join(tmp_text))
         else:
             return ''
 
@@ -120,7 +116,7 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
             tmp = [traffic_intro.strip()]
             for value in (traffic_details[t_type] for t_type in ['localTraffic', 'remoteTraffic'] if
                           t_type in traffic_details):
-                info_entry = ['%s：\n\n%s' % (value_tmp['title'], value_tmp['contents']) for value_tmp in value]
+                info_entry = [u'%s：\n\n%s' % (value_tmp['title'], value_tmp['contents']) for value_tmp in value]
                 tmp.extend(info_entry)
             tmp = filter(lambda val: val, tmp)
             data['trafficInfo'] = '\n\n'.join(tmp) if tmp else ''
@@ -165,35 +161,19 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
             for k, v in info.items():
                 if v:
                     data[k] = v
-            data['miscInfo'] = []
         else:
             if info:
                 data['miscInfo'] = info
 
-        if not is_locality:
-            # 门票信息
-            if 'ticket_info' in contents:
-                price_desc = contents['ticket_info']['price_desc'] if 'price_desc' in contents['ticket_info'] else ''
-                open_time_desc = contents['ticket_info']['open_time_desc'] if 'open_time_desc' in contents[
-                    'ticket_info'] else ''
-                data['priceDesc'] = price_desc
-                data['openTime'] = open_time_desc
-            else:
-                data['priceDesc'] = ''
-                data['openTime'] = ''
-
     def build_scene(self, data, entry):
         from utils import guess_coords
-
-        col_loc = get_mongodb('geo', 'Locality', 'mongo')
-        col_country = get_mongodb('geo', 'Country', 'mongo')
 
         for k, v in {'abroad': True if entry['is_china'] == '0' else False,
                      'taoziEnabled': False, 'enabled': True,
                      'commentCnt': int(entry['rating_count']) if 'rating_count' in entry else None,
                      'visitCnt': int(entry['gone_count']) if 'gone_count' in entry else None,
                      'favorCnt': int(entry['going_count']) if 'going_count' in entry else None,
-                     'hotness': float(entry['star']) / 5 if 'star' in entry else None}.items():
+                     'rating': float(entry['star']) / 5 if 'star' in entry else None}.items():
             data[k] = v
 
         # 别名
@@ -205,33 +185,20 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
             else:
                 continue
 
-        loc_list = []
         # 层级结构
         if 'scene_path' in entry:
-            country_fetched = False
-            for scene_path in entry['scene_path']:
-                if country_fetched:
-                    ret = col_loc.find_one({'alias': scene_path['sname']}, {'zhName': 1, 'enName': 1})
-                    if ret:
-                        loc_list.append({key: ret[key] for key in ['_id', 'zhName', 'enName']})
-                else:
-                    ret = col_country.find_one({'alias': scene_path['sname']}, {'zhName': 1, 'enName': 1})
-                    if ret:
-                        data['country'] = {key: ret[key] for key in ['_id', 'zhName', 'enName']}
-                        loc_list.append({key: ret[key] for key in ['_id', 'zhName', 'enName']})
-                        country_fetched = True
-
-        data['targets'] = [loc_tmp['_id'] for loc_tmp in loc_list]
-
-        data['tags'] = []
+            loc_list = [{key: tmp[key] for key in ['sid', 'surl', 'sname']} for tmp in entry['scene_path']]
+            if loc_list:
+                data['locList'] = loc_list
 
         if 'ext' in entry:
             tmp = entry['ext']
             data['desc'] = tmp['more_desc'] \
                 if 'more_desc' in tmp else tmp['abs_desc']
-            data['rating'] = float(tmp['avg_remark_score']) / 5 \
-                if 'avg_remark_score' in tmp else None
-            data['enName'] = tmp['en_sname'] if 'en_sname' in tmp else ''
+            if 'avg_remark_score' in tmp:
+                data['rating'] = float(tmp['avg_remark_score']) / 5
+            if 'en_name' in tmp:
+                data['enName'] = tmp['en_sname']
             # 位置信息
             # if 'map_info' in tmp and tmp['map_info']:
             map_info = filter(lambda val: val,
@@ -245,14 +212,9 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
                         data['location'] = {'type': 'Point', 'coordinates': ret}
             except (ValueError, UnicodeEncodeError):
                 self.log(map_info, logging.ERROR)
-        else:
-            data['desc'] = ''
-            data['rating'] = None
-            data['enName'] = ''
-            data['location'] = None
 
         # 设置别名
-        if data['enName']:
+        if 'enName' in data and data['enName']:
             alias.add(data['enName'])
         data['alias'] = list(set(filter(lambda val: val, [tmp.strip().lower() for tmp in alias])))
 
@@ -286,6 +248,26 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
 
         return data
 
+    def price_info(self, data, raw):
+        """
+        获取门票信息
+        :param data:
+        :param raw:
+        :return:
+        """
+        contents = raw['content'] if 'content' in raw else {}
+
+        if 'ticket_info' in contents:
+            price_desc = contents['ticket_info']['price_desc'] if 'price_desc' in contents['ticket_info'] else ''
+            open_time_desc = contents['ticket_info']['open_time_desc'] if 'open_time_desc' in contents[
+                'ticket_info'] else ''
+            if price_desc:
+                data['priceDesc'] = price_desc
+            if open_time_desc:
+                data['openTime'] = open_time_desc
+
+        return data
+
     def build_misc(self, data, entry):
         contents = entry['content'] if 'content' in entry else {}
 
@@ -297,54 +279,131 @@ class BaiduPoiProcessor(BaseProcessor, MfwSuggestion, BaiduSuggestion):
         # 旅行时间
         if 'besttime' in contents:
             best_time = contents['besttime']
-            travel_month = best_time['more_desc'] if 'more_desc' in best_time else ''
+            travel_month = best_time['more_desc'] if 'more_desc' in best_time else None
             if not travel_month:
-                travel_month = best_time['simple_desc'] if 'simple_desc' in best_time else ''
-            data['travelMonth'] = travel_month.strip()
+                travel_month = best_time['simple_desc'] if 'simple_desc' in best_time else None
+            if travel_month:
+                data['travelMonth'] = travel_month.strip()
 
-            tmp_time_cost = best_time['recommend_visit_time'] if 'recommend_visit_time' in best_time else ''
-            data['timeCostDesc'] = tmp_time_cost
+            tmp_time_cost = best_time['recommend_visit_time'] if 'recommend_visit_time' in best_time else None
+            if tmp_time_cost:
+                data['timeCostDesc'] = tmp_time_cost
 
         self.proc_misc(data, contents, is_locality)
 
         return data
 
-    def build_hotness(self, entry):
-        pass
+    @staticmethod
+    def build_hotness(entry, col, tot):
+        score_list = []
+        for k1, k2 in [['commentCnt', 'rating_count'], ['favorCnt', 'going_count'], ['visitCnt', 'gone_count']]:
+            if k1 not in entry:
+                continue
+            score = col.find({k2: {'$lt': entry[k1]}}, {'_id': 1}).count() / float(tot)
+            score_list.append(score)
+
+        if not score_list:
+            return
+
+        avg = sum(score_list) / len(score_list)
+
+        if 'hotness' in entry and entry['hotness']:
+            entry['hotness'] += avg * 0.2 - 0.1
+        else:
+            entry['hotness'] = avg
+        if entry['hotness'] > 1:
+            entry['hotness'] = 1
+        elif entry['hotness'] < 0:
+            entry['hotness'] = 0
+
+    def is_locality(self, data, raw):
+        """
+        判断是目的地还是景点
+        :param raw:
+        :return:
+        """
+        # 判断是否为目的地：如果存在门票描述，则一定是景点，否则，查看原网页，最后查看type_code字段
+        if 'priceDesc' in data and data['priceDesc']:
+            return False
+
+        # 检查原网页
+        col = get_mongodb('raw_baidu', 'SceneBody', 'mongo-raw')
+        ret = col.find_one({'key': raw['sid']}, {'body': 1})
+        if ret:
+            body = ret['body']
+        else:
+            response = self.request.get('http://lvyou.baidu.com/%s' % raw['surl'])
+            response.encoding = 'utf-8'
+            body = response.text
+            col.update({'key': raw['sid']}, {'$set': {'key': raw['sid'], 'body': body}}, upsert=True)
+
+        from lxml import etree
+
+        tree = etree.fromstring(body, parser=etree.HTMLParser())
+        if u'景点' in tree.xpath('//div[@id="J-sceneViewNav"]/a[contains(@class,"nslog")]/span/text()'):
+            return True
+
+        headers = tree.xpath(
+            '//nav[@id="J-sceneViewNav"]/div[contains(@class,"scene-navigation")]/div[contains(@class,"nav-col")]')
+        if headers:
+            return True
+
+        return False
 
     def populate_tasks(self):
         col_mdd = get_mongodb('proc_baidu', 'BaiduLocality', profile='mongo-raw')
         col_vs = get_mongodb('proc_baidu', 'BaiduPoi', profile='mongo-raw')
 
-        for col_name in ['BaiduPoi', 'BaiduLocality']:
-            col_raw = get_mongodb('raw_baidu', col_name, profile='mongo-raw')
+        col_raw = get_mongodb('raw_baidu', 'BaiduScene', profile='mongo-raw')
+        tot = col_raw.count()
 
-            cursor = col_raw.find({})
-            cursor.skip(self.args.skip)
-            if self.args.limit:
-                cursor.limit(self.args.limit)
+        query = json.loads(self.args.query) if self.args.query else {}
+        query = {'sid': {'$in': ['68c27ae3b9d414ff762fddfe', 'ee14f4778b2de74f2ebe67fe']}}
 
-            for entry in cursor:
-                def func(val=entry):
-                    self.get_type_code(val)
-                    data = {'source': {'baidu': {'id': val['sid'], 'surl': val['surl']}}}
-                    self.build_scene(data, val)
+        cursor = col_raw.find(query)
+        cursor.skip(self.args.skip)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
 
-                    location = data['location'] if 'location' in data else None
+        for entry in cursor:
+            def func(val=entry):
+                self.log(u'Processing: %s, sid=%s, surl=%s' % (val['sname'], val['sid'], val['surl']))
+
+                self.get_type_code(val)
+                if 'type_code' not in val:
+                    self.logger.error(
+                        'Cannot find type code for: %s, sid=%s, surl=%s' % (val['sname'], val['sid'], val['surl']))
+                    return
+
+                data = {'source': {'baidu': {'id': val['sid'], 'surl': val['surl']}}}
+
+                self.price_info(data, val)
+                val['is_locality'] = self.is_locality(data, val)
+                self.build_scene(data, val)
+                location = data['location'] if 'location' in data else None
+
+                if self.args.mfw_match:
                     mfw_ret = None
                     if location:
                         mfw_ret = self.match_mfw(val, location)
 
                     if mfw_ret:
-                        is_locality = True if mfw_ret['type'] == 'mdd' else False
-                    else:
-                        is_locality = 'type_code' in val and val['type_code'] <= 5
-                    val['is_locality'] = is_locality
+                        data['source']['mafengwo'] = {'id': mfw_ret['id']}
+                        alias_set = set(data['alias'])
+                        alias_set.add(mfw_ret['name'].strip().lower())
+                        data['alias'] = list(alias_set)
 
-                    self.build_misc(data, val)
+                self.build_misc(data, val)
 
-                    col = col_mdd if is_locality else col_vs
-                    col.update({'source.baidu.id': data['source']['baidu']['id']}, {'$set': data}, upsert=True)
+                self.build_hotness(data, col_raw, tot)
 
-                self.add_task(func)
+                col = col_mdd if val['is_locality'] else col_vs
+                source = data.pop('source')
+                ops = {'$set': data}
+                for k in source:
+                    ops['$set']['source.%s' % k] = source[k]
+
+                col.update({'source.baidu.id': source['baidu']['id']}, ops, upsert=True)
+
+            self.add_task(func)
 

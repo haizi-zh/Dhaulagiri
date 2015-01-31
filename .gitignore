@@ -60,3 +60,4 @@ target/
 qiniu.cfg
 mongo.cfg
 *.yaml
+sandbox.py

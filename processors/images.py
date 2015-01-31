@@ -7,11 +7,10 @@ from hashlib import md5
 import gevent
 import pymongo
 from pymongo.errors import DuplicateKeyError
+import requests
 
 from processors import BaseProcessor
 from utils.database import get_mongodb
-
-import requests
 
 
 __author__ = 'zephyre'
@@ -33,7 +32,8 @@ class ImageUploader(BaseProcessor):
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--url-filter', type=str)
-        return parser.parse_args()
+        args, leftover = parser.parse_known_args()
+        return args
 
     @staticmethod
     def check_exist(entry):
@@ -186,8 +186,9 @@ class ImageUploader(BaseProcessor):
             self.fetch_stat(entry)
             self.fetch_info(entry)
 
+            image_id = entry.pop('_id')
             col_im.update({'url_hash': entry['url_hash']}, {'$set': entry}, upsert=True)
-            col_cand.remove({'_id': entry['_id']})
+            col_cand.remove({'_id': image_id})
 
         except IOError:
             self.on_failure(entry)
