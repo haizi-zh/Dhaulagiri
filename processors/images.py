@@ -78,8 +78,7 @@ class ImageUploader(BaseProcessor):
 
         return q
 
-    @staticmethod
-    def on_failure(entry):
+    def on_failure(self, entry):
         """
         Called on failure
         """
@@ -88,6 +87,7 @@ class ImageUploader(BaseProcessor):
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
+        self.logger.warn('Processing failed for image: %s' % entry['key'])
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
@@ -202,14 +202,12 @@ class ImageUploader(BaseProcessor):
 
         query = {'failCnt': {'$not': {'$gte': 5}}}
 
-        from bson import ObjectId
-
         extra_query = eval(self.args.query) if self.args.query else {}
 
         if extra_query:
             query = {'$and': [query, extra_query]}
 
-        cursor = col_cand.find(query, snapshot=True)#.sort('_id', pymongo.DESCENDING)
+        cursor = col_cand.find(query, snapshot=True)  # .sort('_id', pymongo.DESCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
