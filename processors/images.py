@@ -32,6 +32,7 @@ class ImageUploader(BaseProcessor):
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--url-filter', type=str)
+        parser.add_argument('--query', type=str)
         args, leftover = parser.parse_known_args()
         return args
 
@@ -77,8 +78,7 @@ class ImageUploader(BaseProcessor):
 
         return q
 
-    @staticmethod
-    def on_failure(entry):
+    def on_failure(self, entry):
         """
         Called on failure
         """
@@ -87,6 +87,7 @@ class ImageUploader(BaseProcessor):
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
+        self.logger.warn('Processing failed for image: %s, failCnt: %d' % (entry['key'], entry['failCnt']))
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
@@ -187,6 +188,8 @@ class ImageUploader(BaseProcessor):
             self.fetch_info(entry)
 
             image_id = entry.pop('_id')
+            if 'failCnt' in entry:
+                entry.pop('failCnt')
             col_im.update({'url_hash': entry['url_hash']}, {'$set': entry}, upsert=True)
             col_cand.remove({'_id': image_id})
 
@@ -197,14 +200,21 @@ class ImageUploader(BaseProcessor):
     def populate_tasks(self):
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
 
-        cursor = col_cand.find({'$or': [{'failCnt': None}, {'failCnt': {'$lt': 5}}]}, snapshot=True)
+        query = {'failCnt': {'$not': {'$gte': 5}}}
+
+        extra_query = eval(self.args.query) if self.args.query else {}
+
+        if extra_query:
+            query = {'$and': [query, extra_query]}
+
+        cursor = col_cand.find(query, snapshot=True)  # .sort('_id', pymongo.DESCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
 
         for val in cursor:
-            def task(entry=val):
 
+            def task(entry=val):
                 if self.args.url_filter:
                     pattern = self.args.url_filter
                     if not re.match(pattern, entry['url']):
