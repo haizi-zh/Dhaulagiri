@@ -1000,50 +1000,6 @@ class NoteSolr(BaseProcessor):
             self.add_task(func)
 
 
-class ViewSpotSolr(BaseProcessor):
-    name = 'vs_solr'
-
-    def __init__(self, *args, **kwargs):
-        BaseProcessor.__init__(self, *args, **kwargs)
-        self.args = self.args_builder()
-
-    def args_builder(self):
-        parser = self.arg_parser
-        parser.add_argument('--limit', default=0, type=int)
-        parser.add_argument('--skip', default=0, type=int)
-        parser.add_argument('--query', type=str)
-        return parser.parse_args()
-
-    def get_data(self, item):
-        image = item['images'] if 'images' in item else None
-        image_list = []
-        if image:
-            image_list = [tmp['key'] for tmp in image]
-        data = {
-            'id': str(item['_id']),
-            'zhName': item['zhName'] if 'zhName' in item else None,
-            'desc': item['desc'] if 'desc' in item else None,
-            'alias': item['alias'] if 'alias' in item else None,
-            'images': image_list,
-            'abroad': item['abroad'] if 'abroad' in item else None,
-            'enName': item['enName'] if 'enName' in item else None
-        }
-        return data
-
-    def populate_tasks(self):
-        col = get_mongodb('poi', 'ViewSpot', 'mongo')
-        solr_s = get_solr('viewspot')
-        for entry in col.find().batch_size(20):
-            def func(item=entry):
-                data = self.get_data(item)
-                if data:
-                    doc = [data]
-                    try:
-                        solr_s.add(doc)
-                    except pysolr.SolrError, e:
-                        self.log('error:%s,id:%s' % (e.message, data['id']))
-
-            self.add_task(func)
 
 
 class MafengwoAbs(BaseProcessor):
