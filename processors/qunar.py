@@ -249,6 +249,162 @@ class QunarCommentProcessor(BaseProcessor):
         self._join()
 
 
+class QunarCommentSpider(BaseProcessor):
+    """
+    调用http://travel.qunar.com/place/api/html/comments/poi/3202964?sortField=1&img=true&pageSize=10&page=1接口，
+    抓取去哪儿POI的评论数据
+    """
+    name = 'qunar-poi-comment'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
+        args, leftover = parser.parse_known_args()
+        return args
+
+    @staticmethod
+    def validator(response):
+        if response.status_code != 200 or 'security.qunar.com' in response.url:
+            return False
+        try:
+            response.json()['data']
+        except (ValueError, KeyError):
+            return False
+
+        return True
+
+    def parse_comments(self, data):
+        from lxml import etree
+        from datetime import datetime
+
+        comment_list = []
+        for comment_node in etree.fromstring(data, etree.HTMLParser()).xpath(
+                '//ul[@id="comment_box"]/li[contains(@class,"e_comment_item")]'):
+            comment = {'comment_id': int(re.search(r'cmt_item_(\d+)', comment_node.xpath('./@id')[0]).group(1))}
+
+            for k1, k2 in [['title', 'e_comment_title'], ['contents', 'e_comment_content']]:
+                tmp = comment_node.xpath('.//div[@class="%s"]' % k2)
+                if tmp:
+                    tmp = tmp[0]
+                    text = ''.join(tmp.itertext())
+                    if text:
+                        comment[k1] = text
+
+            tmp = comment_node.xpath('.//div[@class="e_comment_star_box"]//span[contains(@class,cur_star)]/@class')
+            if tmp:
+                match = re.search(r'star_(\d)', tmp[0])
+                if match:
+                    comment['rating'] = float(match.group(1)) / 5.0
+
+            images = []
+            for image_node in comment_node.xpath('.//div[@class="e_comment_imgs_box"]'
+                                                 '//a[@data-beacon="comment_pic"]/img[@src]'):
+                tmp=image_node.xpath('./@src')
+                if not tmp:
+                    continue
+                image_data = {'url': re.sub(r'_r_\d+x\d+[^/]+\.jpg', '', tmp[0])}
+
+                tmp=image_node.xpath('./@alt')
+                if tmp and tmp[0].strip():
+                    image_data['title']=tmp[0].strip()
+                images.append(image_data)
+            if images:
+                comment['images']=images
+
+            for tmp in comment_node.xpath('.//div[@class="e_comment_add_info"]/ul/li/text()'):
+                try:
+                    ts = datetime.strptime(tmp, '%Y-%m-%d')
+
+
+                except ValueError:
+                    continue
+
+
+
+
+            comment_list.append(comment)
+
+        return comment_list
+
+    def populate_tasks(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
+        col = get_mongodb('poi', col_name, 'mongo')
+
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+
+        col_raw = get_mongodb('raw_qunar', 'QunarPoiImage', 'mongo-raw')
+
+        cursor = col.find({'source.qunar.id': {'$ne': None}}, {'source.qunar.id'})
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        cursor.skip(self.args.skip)
+
+        tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&img=true&pageSize=50&page=%d'
+
+        for val in cursor:
+            def func(entry=val):
+                qunar_id = entry['source']['qunar']['id']
+                oid = entry['_id']
+
+                page = 1
+                while True:
+                    url = tmpl % (qunar_id, page)
+                    self.logger.debug('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
+
+                    try:
+                        response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.validator}})
+                    except IOError:
+                        self.logger.warn('Failed to read %s due to IOError' % url)
+                        return
+
+                    if not response:
+                        self.logger.warn('Failed to read %s' % url)
+                        return
+
+                    comments = self.parse_comments(response.json()['data'])
+                    # 如果返回空列表，说明已经到达最末页
+                    if not comments:
+                        break
+                    else:
+                        for c in comments:
+                            try:
+                                pass
+                            except OperationFailure:
+                                pass
+                        page += 1
+                        continue
+
+                    col_raw.update({'id': qunar_id}, {'$set': {'id': qunar_id, 'data': data}}, upsert=True)
+                else:
+                    data = ret['data']
+
+                for idx, img_entry in enumerate(data):
+                    url = img_entry['url']
+                    key = md5(url).hexdigest()
+                    url_hash = key
+                    ord = idx
+
+                    image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord}
+
+                    if img_entry['userName']:
+                        image['meta'] = {'userName': img_entry['userName']}
+
+                    self.logger.info('Retrieved image: %s, url=%s, poi=%d' % (key, url, qunar_id))
+                    ops = {'$set': image, '$addToSet': {'itemIds': entry['_id']}}
+                    ret = col_im.update({'url_hash': url_hash}, ops)
+                    if not ret['updatedExisting']:
+                        col_cand.update({'url_hash': url_hash}, ops, upsert=True)
+
+            self.add_task(func)
+
+
 class QunarImageSpider(BaseProcessor):
     """
     调用http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=3202964接口，
