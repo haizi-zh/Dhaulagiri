@@ -182,6 +182,7 @@ class ProxyMiddleware(DownloadMiddleware):
             self.rw_lock.writer_release()
 
     def add_fail_cnt(self, proxy_name):
+        drop_flag = False
         try:
             self.rw_lock.writer_acquire()
             if proxy_name not in self.proxies:
@@ -191,9 +192,12 @@ class ProxyMiddleware(DownloadMiddleware):
             self._manager.engine.logger.debug(
                 'Proxy: %s failCnt added to %d' % (proxy_name, self.proxies[proxy_name]['failCnt'] ))
             if self.proxies[proxy_name]['failCnt'] > self.max_error:
-                self.drop_proxy(proxy_name)
+                drop_flag = True
         finally:
             self.rw_lock.writer_release()
+
+        if drop_flag:
+            self.drop_proxy(proxy_name)
 
     def reset_fail_cnt(self, proxy_name):
         try:
