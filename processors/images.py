@@ -87,7 +87,7 @@ class ImageUploader(BaseProcessor):
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
-        self.logger.warn('Processing failed for image: %s' % entry['key'])
+        self.logger.warn('Processing failed for image: %s, failCnt: %d' % (entry['key'], entry['failCnt']))
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
