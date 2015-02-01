@@ -281,7 +281,7 @@ class QunarCommentSpider(BaseProcessor):
 
     def parse_comments(self, data):
         from lxml import etree
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         comment_list = []
         for comment_node in etree.fromstring(data, etree.HTMLParser()).xpath(
@@ -319,7 +319,7 @@ class QunarCommentSpider(BaseProcessor):
 
             for tmp in comment_node.xpath('.//div[@class="e_comment_add_info"]/ul/li/text()'):
                 try:
-                    ts = datetime.strptime(tmp, '%Y-%m-%d')
+                    comment['cTime']=long(ts - datetime.utcfromtimestamp(0) - timedelta(hours=8)).total_seconds()
 
 
                 except ValueError:
