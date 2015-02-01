@@ -218,7 +218,7 @@ class RequestHelper(object):
 
                 for entry in mw_list:
                     mw = entry['middleware']
-                    ret = mw.on_request(prepped, s, s_args)
+                    ret = mw.on_request(prepped, s, s_args, user_data=user_data)
                     prepped, s, s_args = ret['value']
                     pass_next = ret['next']
                     if not pass_next:
