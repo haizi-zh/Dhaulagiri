@@ -189,6 +189,7 @@ class QunarCommentSpider(BaseProcessor):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
         parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
         args, leftover = parser.parse_known_args()
         return args
@@ -204,13 +205,36 @@ class QunarCommentSpider(BaseProcessor):
 
         return True
 
+    def resolve_avatar(self, url):
+        """
+        根据url获得最终的链接地址（处理重定向问题）
+        """
+        ret_url = url
+
+        response = self.request.get(url, allow_redirects=False)
+        if response.is_redirect:
+            try:
+                ret_url = response.headers['location']
+            except KeyError:
+                pass
+
+        return ret_url
+
     def parse_comments(self, data):
         from lxml import etree
         from datetime import datetime, timedelta
 
         comment_list = []
-        for comment_node in etree.fromstring(data, etree.HTMLParser()).xpath(
-                '//ul[@id="comment_box"]/li[contains(@class,"e_comment_item")]'):
+
+        node_list = []
+
+        try:
+            node_list = etree.fromstring(data, etree.HTMLParser()).xpath(
+                '//ul[@id="comment_box"]/li[contains(@class,"e_comment_item")]')
+        except ValueError:
+            self.logger.warn(data)
+
+        for comment_node in node_list:
             comment = {'comment_id': int(re.search(r'cmt_item_(\d+)', comment_node.xpath('./@id')[0]).group(1))}
 
             for k1, k2 in [['title', 'e_comment_title'], ['contents', 'e_comment_content']]:
@@ -221,7 +245,7 @@ class QunarCommentSpider(BaseProcessor):
                     if text:
                         comment[k1] = text
 
-            tmp = comment_node.xpath('.//div[@class="e_comment_star_box"]//span[contains(@class,cur_star)]/@class')
+            tmp = comment_node.xpath('.//div[@class="e_comment_star_box"]//span[contains(@class,"cur_star")]/@class')
             if tmp:
                 match = re.search(r'star_(\d)', tmp[0])
                 if match:
@@ -230,28 +254,30 @@ class QunarCommentSpider(BaseProcessor):
             images = []
             for image_node in comment_node.xpath('.//div[@class="e_comment_imgs_box"]'
                                                  '//a[@data-beacon="comment_pic"]/img[@src]'):
-                tmp=image_node.xpath('./@src')
+                tmp = image_node.xpath('./@src')
                 if not tmp:
                     continue
-                image_data = {'url': re.sub(r'_r_\d+x\d+[^/]+\.jpg', '', tmp[0])}
+                images.append({'url': re.sub(r'_r_\d+x\d+[^/]+\.jpg', '', tmp[0])})
 
-                tmp=image_node.xpath('./@alt')
-                if tmp and tmp[0].strip():
-                    image_data['title']=tmp[0].strip()
-                images.append(image_data)
             if images:
-                comment['images']=images
+                comment['images'] = images
 
             for tmp in comment_node.xpath('.//div[@class="e_comment_add_info"]/ul/li/text()'):
                 try:
-                    comment['cTime']=long(ts - datetime.utcfromtimestamp(0) - timedelta(hours=8)).total_seconds()
-
-
+                    comment['cTime'] = long((datetime.strptime(tmp, '%Y-%m-%d') -
+                                             datetime.utcfromtimestamp(0) - timedelta(hours=8)).total_seconds())
+                    break
                 except ValueError:
-                    continue
+                    pass
 
+            tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_pic"]/a/img[@src]/@src')
+            if tmp:
+                avatar = re.sub(r'\?\w$', '', tmp[0])
+                comment['user_avatar'] = self.resolve_avatar(avatar)
 
-
+            tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_name"]/a/text()')
+            if tmp and tmp[0].strip():
+                comment['user_name'] = tmp[0].strip()
 
             comment_list.append(comment)
 
@@ -260,72 +286,50 @@ class QunarCommentSpider(BaseProcessor):
     def populate_tasks(self):
         col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
         col = get_mongodb('poi', col_name, 'mongo')
+        col_raw = get_mongodb('raw_qunar', 'QunarPoiComment', 'mongo-raw')
 
-        col_im = get_mongodb('imagestore', 'Images', 'mongo')
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        query = {'source.qunar.id': {'$ne': None}}
+        extra_query = eval(self.args.query) if self.args.query else {}
+        if extra_query:
+            query = {'$and': [query, extra_query]}
 
-        col_raw = get_mongodb('raw_qunar', 'QunarPoiImage', 'mongo-raw')
-
-        cursor = col.find({'source.qunar.id': {'$ne': None}}, {'source.qunar.id'})
+        cursor = col.find(query, {'source.qunar.id'})
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
 
-        tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&img=true&pageSize=50&page=%d'
+        tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&pageSize=50&page=%d'
 
         for val in cursor:
             def func(entry=val):
                 qunar_id = entry['source']['qunar']['id']
-                oid = entry['_id']
 
                 page = 1
                 while True:
                     url = tmpl % (qunar_id, page)
-                    self.logger.debug('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
+                    self.logger.info('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
 
                     try:
                         response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.validator}})
                     except IOError:
                         self.logger.warn('Failed to read %s due to IOError' % url)
-                        return
+                        break
 
-                    if not response:
-                        self.logger.warn('Failed to read %s' % url)
-                        return
+                    data = response.json()
+                    if data['errmsg'] != 'success':
+                        self.logger.warn('Error while retrieving %s, errmsg: %s' % (url, data['errmsg']))
+                        break
 
                     comments = self.parse_comments(response.json()['data'])
+                    for c in comments:
+                        col_raw.update({'comment_id': c['comment_id']}, {'$set': c}, upsert=True)
+
                     # 如果返回空列表，说明已经到达最末页
                     if not comments:
                         break
-                    else:
-                        for c in comments:
-                            try:
-                                pass
-                            except OperationFailure:
-                                pass
-                        page += 1
-                        continue
 
-                    col_raw.update({'id': qunar_id}, {'$set': {'id': qunar_id, 'data': data}}, upsert=True)
-                else:
-                    data = ret['data']
-
-                for idx, img_entry in enumerate(data):
-                    url = img_entry['url']
-                    key = md5(url).hexdigest()
-                    url_hash = key
-                    ord = idx
-
-                    image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord}
-
-                    if img_entry['userName']:
-                        image['meta'] = {'userName': img_entry['userName']}
-
-                    self.logger.info('Retrieved image: %s, url=%s, poi=%d' % (key, url, qunar_id))
-                    ops = {'$set': image, '$addToSet': {'itemIds': entry['_id']}}
-                    ret = col_im.update({'url_hash': url_hash}, ops)
-                    if not ret['updatedExisting']:
-                        col_cand.update({'url_hash': url_hash}, ops, upsert=True)
+                    page += 1
+                    continue
 
             self.add_task(func)
 
@@ -404,9 +408,9 @@ class QunarImageSpider(BaseProcessor):
                     url = img_entry['url']
                     key = md5(url).hexdigest()
                     url_hash = key
-                    ord = idx
+                    ord_idx = idx
 
-                    image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord}
+                    image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord_idx}
 
                     if img_entry['userName']:
                         image['meta'] = {'userName': img_entry['userName']}
