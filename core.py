@@ -284,4 +284,5 @@ class RequestHelper(object):
     def get(self, url, retry=10, user_data=None, **kwargs):
         return self.request('GET', url, retry=retry, user_data=user_data, **kwargs)
 
-
+    def post(self, url, retry=10, data=None, user_data=None, **kwargs):
+        return self.request('POST', url, retry=retry, data=data, user_data=user_data, **kwargs)
