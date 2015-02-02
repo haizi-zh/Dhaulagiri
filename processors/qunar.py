@@ -352,6 +352,7 @@ class QunarImageSpider(BaseProcessor):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
         parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
         args, leftover = parser.parse_known_args()
         return args
@@ -376,8 +377,12 @@ class QunarImageSpider(BaseProcessor):
 
         col_raw = get_mongodb('raw_qunar', 'QunarPoiImage', 'mongo-raw')
 
-        cursor = col.find({'source.qunar.id': {'$ne': None}}, {'source.qunar.id'}).sort('source.qunar.id',
-                                                                                        pymongo.ASCENDING)
+        query = {'source.qunar.id': {'$ne': None}}
+        extra_query = eval(self.args.query) if self.args.query else {}
+        if extra_query:
+            query = {'$and': [query, extra_query]}
+
+        cursor = col.find(query, {'source.qunar.id':1}).sort('source.qunar.id',pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
