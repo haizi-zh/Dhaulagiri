@@ -2,7 +2,6 @@
 from hashlib import md5
 import re
 
-import gevent
 import pymongo
 
 from utils.database import get_mongodb, get_mysql_db
@@ -173,80 +172,6 @@ class QunarPoiProcessor(BaseProcessor):
                     self.progress += 1
 
                 self.add_task(func)
-
-
-class QunarCommentProcessor(BaseProcessor):
-    name = 'qunar-comment'
-
-    def __init__(self):
-        super(QunarCommentProcessor, self).__init__()
-
-        self.args = self.args_builder()
-
-    @staticmethod
-    def args_builder():
-        import argparse
-
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--limit', default=None, type=int)
-        parser.add_argument('--skip', default=0, type=int)
-        args, leftovers = parser.parse_known_args()
-        return args
-
-    def run(self):
-        col = get_mongodb('raw_qunar', 'Comment', 'mongo-raw')
-        col_shopping = get_mongodb('poi', 'Shopping', 'mongo')
-        col_dining = get_mongodb('poi', 'Restaurant', 'mongo')
-        col_cmt = get_mongodb('misc', 'Comment', 'mongo')
-
-        cursor = col.find({})
-        if self.args.limit:
-            cursor.limit(self.args.limit)
-        if self.args.skip:
-            cursor.skip(self.args.skip)
-
-        self.total = cursor.count(with_limit_and_skip=True)
-
-        poi_cache = {'dining': {}, 'shopping': {}}
-
-        super(QunarCommentProcessor, self).run()
-
-        for entry in cursor:
-            def func(val=entry):
-
-                self.progress += 1
-
-                poi_id = val['poi_id']
-                poi_type = val['poi_type']
-                cmt_id = val['comment_id']
-
-                if poi_id not in poi_cache[poi_type]:
-                    the_col = {'dining': col_dining, 'shopping': col_shopping}[poi_type]
-                    ret = the_col.find_one({'source.qunar.id': poi_id}, {'_id': 1})
-                    if ret:
-                        poi_cache[poi_type][poi_id] = ret['_id']
-                    else:
-                        return
-
-                item_id = poi_cache[poi_type][poi_id]
-                data = {'source': {'qunar': {'id': cmt_id}}, 'itemId': item_id,
-                        'publishTime': long(1420727777000), 'type': poi_type, 'contents': val['contents']}
-                if 'rating' in val and val['rating']:
-                    data['rating'] = val['rating']
-
-                meta = {}
-                if 'user_name' in val:
-                    meta['userName'] = val['user_name']
-                if meta:
-                    data['meta'] = meta
-
-                print ('Upserting: %s' % val['title']).encode('utf-8')
-                col_cmt.update({'source.qunar.id': cmt_id}, {'$set': data}, upsert=True)
-
-            self.add_task(func)
-            gevent.sleep(0)
-
-        self._join()
 
 
 class QunarCommentSpider(BaseProcessor):
