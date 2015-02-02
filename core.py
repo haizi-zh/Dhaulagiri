@@ -49,7 +49,12 @@ class LoggerMixin(object):
         name = getattr(self, 'name', 'general_logger')
 
         # Set up a specific logger with our desired output level
-        logger = logging.getLogger(name)
+        from hashlib import md5
+        from random import randint
+        import sys
+
+        sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
+        logger = logging.getLogger('%s-%s' % (name, sig))
 
         if args.verbose:
             handler = StreamHandler()
