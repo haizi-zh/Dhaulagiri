@@ -194,42 +194,62 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
-    def get(self, url, retry=10, user_data=None, **kwargs):
+    def request(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None,
+                timeout=None, allow_redirects=True, proxies=None, hooks=None, json=None, retry=5, user_data=None):
+        """Constructs and sends a :class:`Request <Request>`.
+        Returns :class:`Response <Response>` object.
+
+        :param method: method for the new :class:`Request` object.
+        :param url: URL for the new :class:`Request` object.
+        :param params: (optional) Dictionary or bytes to be sent in the query string for the :class:`Request`.
+        :param data: (optional) Dictionary, bytes, or file-like object to send in the body of the :class:`Request`.
+        :param json: (optional) json data to send in the body of the :class:`Request`.
+        :param headers: (optional) Dictionary of HTTP Headers to send with the :class:`Request`.
+        :param cookies: (optional) Dict or CookieJar object to send with the :class:`Request`.
+        :param files: (optional) Dictionary of ``'name': file-like-objects`` (or ``{'name': ('filename', fileobj)}``) for multipart encoding upload.
+        :param auth: (optional) Auth tuple to enable Basic/Digest/Custom HTTP Auth.
+        :param timeout: (optional) How long to wait for the server to send data
+            before giving up, as a float, or a (`connect timeout, read timeout
+            <user/advanced.html#timeouts>`_) tuple.
+        :type timeout: float or tuple
+        :param allow_redirects: (optional) Boolean. Set to True if POST/PUT/DELETE redirect following is allowed.
+        :type allow_redirects: bool
+        :param proxies: (optional) Dictionary mapping protocol to the URL of the proxy.
+
+        Usage::
+
+        """
+
         from requests import Request, Session
+
+        mw_manager = getattr(self._engine, 'middleware_manager', {})
+        if mw_manager and 'download' in mw_manager.mw_dict:
+            mw_list = self._engine.middleware_manager.mw_dict['download']
+        else:
+            mw_list = []
 
         for idx in xrange(retry):
             try:
-                req = Request(method='GET', url=url, headers=kwargs['headers'] if 'headers' in kwargs else None,
-                              data=kwargs['data'] if 'data' in kwargs else None,
-                              params=kwargs['params'] if 'params' in kwargs else None,
-                              auth=kwargs['auth'] if 'auth' in kwargs else None,
-                              cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
-                prepped = req.prepare()
+                prepped = Request(method=method, url=url, headers=headers, files=files, data=data, params=params,
+                                  auth=auth, cookies=cookies, hooks=hooks, json=json).prepare()
 
-                s = Session()
-                s_args = {}
-
-                mw_manager = getattr(self._engine, 'middleware_manager', {})
-
-                if mw_manager and 'download' in mw_manager.mw_dict:
-                    mw_list = self._engine.middleware_manager.mw_dict['download']
-                else:
-                    mw_list = []
+                session = Session()
+                session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
 
                 for entry in mw_list:
                     mw = entry['middleware']
-                    ret = mw.on_request(prepped, s, s_args, user_data=user_data)
-                    prepped, s, s_args = ret['value']
+                    ret = mw.on_request(prepped, session, session_args, user_data=user_data)
+                    prepped, session, session_args = ret['value']
                     pass_next = ret['next']
                     if not pass_next:
                         break
 
                 try:
-                    response = s.send(prepped, **s_args)
+                    response = session.send(prepped, **session_args)
                 except IOError as e:
                     for entry in mw_list:
                         mw = entry['middleware']
-                        pass_next = mw.on_failure(prepped, s_args)
+                        pass_next = mw.on_failure(prepped, session_args)
                         if not pass_next:
                             break
                     raise e
@@ -254,6 +274,9 @@ class RequestHelper(object):
                 else:
                     raise e
 
-        return None
+        raise IOError
+
+    def get(self, url, retry=10, user_data=None, **kwargs):
+        return self.request('GET', url, retry=retry, user_data=user_data, **kwargs)
 
 
