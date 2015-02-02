@@ -293,20 +293,21 @@ class QunarCommentSpider(BaseProcessor):
         if extra_query:
             query = {'$and': [query, extra_query]}
 
-        cursor = col.find(query, {'source.qunar.id'})
+        cursor = col.find(query, {'source.qunar.id'}).sort('source.qunar.id', pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
 
-        tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&pageSize=50&page=%d'
+        tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&pageSize=%d&page=%d'
 
         for val in cursor:
             def func(entry=val):
                 qunar_id = entry['source']['qunar']['id']
 
                 page = 1
+                page_size = 50
                 while True:
-                    url = tmpl % (qunar_id, page)
+                    url = tmpl % (qunar_id, page_size, page)
                     self.logger.info('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
 
                     try:
@@ -322,10 +323,11 @@ class QunarCommentSpider(BaseProcessor):
 
                     comments = self.parse_comments(response.json()['data'])
                     for c in comments:
+                        c['poi_id'] = qunar_id
                         col_raw.update({'comment_id': c['comment_id']}, {'$set': c}, upsert=True)
 
-                    # 如果返回空列表，说明已经到达最末页
-                    if not comments:
+                    # 如果返回空列表，或者comments数量不足pageSize，说明已经到达最末页
+                    if not comments or len(comments) < page_size:
                         break
 
                     page += 1
@@ -374,7 +376,8 @@ class QunarImageSpider(BaseProcessor):
 
         col_raw = get_mongodb('raw_qunar', 'QunarPoiImage', 'mongo-raw')
 
-        cursor = col.find({'source.qunar.id': {'$ne': None}}, {'source.qunar.id'})
+        cursor = col.find({'source.qunar.id': {'$ne': None}}, {'source.qunar.id'}).sort('source.qunar.id',
+                                                                                        pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
