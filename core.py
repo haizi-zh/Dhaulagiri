@@ -1,5 +1,7 @@
 # coding=utf-8
 import logging
+import re
+from time import time
 
 from gevent.lock import BoundedSemaphore
 
@@ -84,6 +86,99 @@ class LoggerMixin(object):
         return logger
 
 
+class TaskTrackerFactory(object):
+    @classmethod
+    def get_instance(cls, tracker_name, expire):
+        return DefaultTaskTracker(expire)
+
+
+class BaseTaskTracker(object):
+    """
+    记录某个任务是否被执行
+    """
+
+    def track(self, task):
+        """
+        如果task可以bypass，则返回True
+
+        :param task:
+        :return:
+        """
+        raise NotImplementedError
+
+    def update(self, task):
+        """
+        更新task的tracking信息
+        :param task:
+        :return:
+        """
+        raise NotImplementedError
+
+
+class DefaultTaskTracker(BaseTaskTracker):
+    def __init__(self, expire):
+        BaseTaskTracker.__init__(self)
+
+        self.__redis = None
+        self.expire = expire
+
+        from threading import Lock
+
+        self.__redis_lock = Lock()
+
+    def track(self, task):
+        r = self.redis
+
+        if not r:
+            return False
+
+        task_key = getattr(task, 'task_key', None)
+        if not task_key:
+            return False
+
+        ret = r.get(task_key)
+        if not ret:
+            return False
+        else:
+            # 判断是否过期
+            return time() < float(ret) + self.expire
+
+    def update(self, task):
+        r = self.redis
+        if not r:
+            return False
+
+        task_key = getattr(task, 'task_key', None)
+        if not task_key:
+            return
+
+        r.set(task_key, time())
+
+    def __get_redis(self):
+        if not self.__redis:
+            try:
+                self.__redis_lock.acquire()
+                if not self.__redis:
+                    import redis
+
+                    from utils import load_yaml
+
+                    cfg = load_yaml()
+                    redis_conf = filter(lambda v: v['profile']=='task-track', cfg['redis'])[0]
+                    host = redis_conf['host']
+                    port = int(redis_conf['port'])
+
+                    self.__redis = redis.StrictRedis(host=host, port=port, db=0)
+            except (KeyError, IOError, IndexError):
+                self.__redis = None
+            finally:
+                self.__redis_lock.release()
+
+        return self.__redis
+
+    redis = property(__get_redis)
+
+
 class ProcessorEngine(LoggerMixin):
     name = 'processor_engine'
 
@@ -148,6 +243,26 @@ class ProcessorEngine(LoggerMixin):
 
         return processor_dict
 
+    @staticmethod
+    def parse_tracking(args):
+        # 默认有效期为1天
+        expire = 3600 * 24
+
+        if args.track_exp:
+            match = re.search(r'([\d\.]+)(\w)', args.track_exp)
+            val = float(match.group(1))
+            unit = match.group(2)
+            if unit == 'd':
+                expire = val * 3600 * 24
+            elif unit == 'h':
+                expire = val * 3600
+            elif unit == 'm':
+                expire = val * 60
+            elif unit == 's':
+                expire = val
+
+        return TaskTrackerFactory.get_instance(args.track, expire) if args.track else None
+
     def __init__(self):
         import argparse
         from utils import load_yaml
@@ -158,9 +273,14 @@ class ProcessorEngine(LoggerMixin):
 
         # Base argument parser
         parser = argparse.ArgumentParser()
-        parser.add_argument('cmd', type=str)
-
+        parser.add_argument('--track', action='store_true')
+        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
+        parser.add_argument('--track-exp', default=None, type=str)
+        args, leftover = parser.parse_known_args()
         self.arg_parser = parser
+
+        # 获得TaskTracker
+        self.task_tracker = self.parse_tracking(args)
 
         self.request = RequestHelper.from_engine(self)
         self.middleware_manager = MiddlewareManager.from_engine(self)

@@ -14,6 +14,9 @@ class Worker(object):
     __index = 0
 
     def _run(self):
+
+        task_tracker = self.processor.engine.task_tracker
+
         while True:
             self.idle = True
             self.logger.debug('[#%d] - Retrieving next task...' % self.idx)
@@ -23,6 +26,12 @@ class Worker(object):
                 continue
             finally:
                 self.idle = False
+
+            if task_tracker:
+                # Task tracking机制已启用
+                if task_tracker.track(task):
+                    self.logger.debug('[#%d] - Task %s bypassed'%(self.idx, getattr(task, 'task_key')))
+                    continue
 
             self.logger.debug('[#%d] - Task started' % self.idx)
             try:
@@ -35,6 +44,10 @@ class Worker(object):
 
             self.logger.debug('[#%d] - Task completed' % self.idx)
             self.processor.incr_progress()
+
+            if task_tracker:
+                task_tracker.update(task)
+
             gevent.sleep(0)
 
     def __init__(self, processor, queue, idx):
@@ -69,12 +82,16 @@ class BaseProcessor(LoggerMixin):
         from time import time
         from hashlib import md5
         from gevent.queue import Queue
+        from threading import Lock
 
         self.processor_name = '%s:%s' % (self.name, md5(str(time())).hexdigest()[:6])
 
         LoggerMixin.__init__(self)
 
         self.engine = engine
+
+        self.__redis = None
+        self.redis_lock = Lock()
 
         self.progress = 0
         self.total = 0
@@ -87,6 +104,7 @@ class BaseProcessor(LoggerMixin):
         self.polling_interval = 1
 
         self.arg_parser = self.engine.arg_parser
+        # 并发数量
         self.arg_parser.add_argument('--concur', default=20, type=int)
         ret, leftover = self.arg_parser.parse_known_args()
         self.args = ret
@@ -140,7 +158,11 @@ class BaseProcessor(LoggerMixin):
             else:
                 break
 
-        self.tasks.put(lambda: task(*args, **kwargs), timeout=120)
+        func = lambda: task(*args, **kwargs)
+        task_key = getattr(task, 'task_key', None)
+        if task_key:
+            setattr(func, 'task_key', task_key)
+        self.tasks.put(func, timeout=120)
         gevent.sleep(0)
 
     def _wait_for_workers(self):
