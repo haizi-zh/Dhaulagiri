@@ -3,15 +3,18 @@ from hashlib import md5
 import re
 
 import pymongo
+from processors import BaseProcessor
 
 from utils.database import get_mongodb, get_mysql_db
-from processors import BaseProcessor, runproc
 
 
 __author__ = 'zephyre'
 
 
 class QunarPoiProcessor(BaseProcessor):
+    def populate_tasks(self):
+        pass
+
     name = 'qunar-poi'
 
     def __init__(self, *args, **kwargs):
@@ -116,7 +119,6 @@ class QunarPoiProcessor(BaseProcessor):
 
         return data
 
-    @runproc
     def run(self):
         self.conn = get_mysql_db('restore_poi', profile='mysql')
 

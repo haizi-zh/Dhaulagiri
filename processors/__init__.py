@@ -26,7 +26,16 @@ class Worker(object):
 
             self.logger.debug('[#%d] - Task started' % self.idx)
             try:
-                task()
+                ret = task()
+                # 满足一致性。如果ret不是iterable，则将其转换为列表
+                if not hasattr(ret, '__iter__'):
+                    ret = [ret]
+
+                for r in ret:
+                    if hasattr(r, '__call__'):
+                        # 返回值是一个回调函数
+                        self.processor.add_task(r)
+
             except Exception as e:
                 if e.message:
                     self.logger.error('Error occured: %s' % e.message, exc_info=True)
