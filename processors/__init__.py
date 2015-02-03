@@ -10,17 +10,47 @@ __author__ = 'zephyre'
 import gevent
 
 
-def runproc(func):
-    def wrapper(self):
-        import sys
+class Worker(object):
+    __index = 0
 
-        self.log('Processor started: %s' % ' '.join(sys.argv))
+    def _run(self):
+        while True:
+            self.idle = True
+            self.logger.debug('[#%d] - Retrieving next task...' % self.idx)
+            try:
+                task = self._task_queue.get(block=True)
+            except Empty:
+                continue
+            finally:
+                self.idle = False
 
-        self._start_workers()
-        func(self)
-        self._join()
+            self.logger.debug('[#%d] - Task started' % self.idx)
+            try:
+                task()
+            except Exception as e:
+                if e.message:
+                    self.logger.error('Error occured: %s' % e.message, exc_info=True)
+                else:
+                    self.logger.error('Error occured: unknown', exc_info=True)
 
-    return wrapper
+            self.logger.debug('[#%d] - Task completed' % self.idx)
+            self.processor.incr_progress()
+            gevent.sleep(0)
+
+    def __init__(self, processor, queue, idx):
+        self._task_queue = queue
+        self.idle = False
+        self.processor = processor
+        self.logger = processor.logger
+        # worker的编号
+        self.idx = idx
+
+        self.gevent = gevent.spawn(self._run)
+
+    @classmethod
+    def from_processor(cls, processor, queue):
+        Worker.__index += 1
+        return Worker(processor, queue, Worker.__index)
 
 
 class BaseProcessor(LoggerMixin):
@@ -48,13 +78,16 @@ class BaseProcessor(LoggerMixin):
 
         self.progress = 0
         self.total = 0
+        # 超过这一限制时，add_task就暂停向其中添加任务
         self.maxsize = 1000
-        self.op_done = False
-        self.tasks = Queue(self.maxsize)
-        self.jobs = []
+        self.tasks = Queue()
+        self.workers = []
+
+        # 默认的polling间隔为1秒
+        self.polling_interval = 1
 
         self.arg_parser = self.engine.arg_parser
-        self.arg_parser.add_argument('--concur', default=10, type=int)
+        self.arg_parser.add_argument('--concur', default=20, type=int)
         ret, leftover = self.arg_parser.parse_known_args()
         self.args = ret
         self.concur = ret.concur
@@ -63,37 +96,21 @@ class BaseProcessor(LoggerMixin):
         self.checkpoint_prog = None
         self.init_ts = time()
 
-    def _join(self):
-        self.op_done = True
-        gevent.joinall(self.jobs[1:])
-        gevent.kill(self.jobs[0])
+        # 心跳任务
+        self.heart_beat = None
+
+    def incr_progress(self):
+        self.progress += 1
 
     def _start_workers(self):
-        def worker():
-            while True:
-                if self.op_done and self.tasks.empty():
-                    break
-                try:
-                    task = self.tasks.get(timeout=1)
-                except Empty:
-                    continue
-
-                try:
-                    task()
-                except Exception as e:
-                    if e.message:
-                        self.logger.error('Error occured: %s' % e.message, exc_info=True)
-                    else:
-                        self.logger.error('Error occured: unknown', exc_info=True)
-
-                gevent.sleep(0)
-
         def timer():
+            """
+            每30秒启动一次，输出当前进度
+            """
             import time
 
-            while not self.tasks.empty() or not self.op_done:
+            while True:
                 msg = 'Progress: %d / %d.' % (self.progress, self.total)
-
                 cts = time.time()
 
                 if self.checkpoint_prog is not None and self.checkpoint_ts is not None:
@@ -106,29 +123,55 @@ class BaseProcessor(LoggerMixin):
                 self.log(msg)
                 gevent.sleep(30)
 
+        self.heart_beat = gevent.spawn(timer)
+
         gevent.signal(signal.SIGKILL, gevent.kill)
         gevent.signal(signal.SIGQUIT, gevent.kill)
-        self.jobs = [gevent.spawn(timer)]
+
         for i in xrange(self.concur):
-            self.jobs.append(gevent.spawn(worker))
+            worker = Worker.from_processor(self, self.tasks)
+            self.workers.append(worker)
 
-    def add_task(self, task):
+    def add_task(self, task, *args, **kwargs):
+        while True:
+            # 如果self.tasks中的项目过多，则暂停添加
+            if self.tasks.qsize() > self.maxsize:
+                gevent.sleep(self.polling_interval)
+            else:
+                break
 
-        def wrapper():
-            self.progress += 1
-            task()
-
-        self.tasks.put(wrapper, timeout=120)
+        self.tasks.put(lambda: task(*args, **kwargs), timeout=120)
         gevent.sleep(0)
 
+    def _wait_for_workers(self):
+        """
+        等待所有的worker是否完成。判据：所有的worker都处于idle状态，并且tasks队列已空
+        :return:
+        """
+        while True:
+            if not self.tasks.empty():
+                gevent.sleep(self.polling_interval)
+                continue
+
+            completed = True
+            for w in self.workers:
+                if not w.idle:
+                    gevent.sleep(self.polling_interval)
+                    completed = False
+                    break
+
+            if completed:
+                break
+
+        gevent.killall([w.gevent for w in self.workers])
+        gevent.kill(self.heart_beat)
+
     def run(self):
-        import time
-
         self._start_workers()
-
         self.populate_tasks()
+        self._wait_for_workers()
 
-        self._join()
+        import time
 
         self.log('Processor ended. %d items processed in %d minutes' % (self.progress,
                                                                         int((time.time() - self.init_ts) / 60.0)))
