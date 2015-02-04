@@ -202,6 +202,11 @@ class ImageUploader(BaseProcessor):
 
         query = {'failCnt': {'$not': {'$gte': 5}}}
 
+        from bson import ObjectId
+
+        if False:
+            return ObjectId()
+
         extra_query = eval(self.args.query) if self.args.query else {}
 
         if extra_query:
@@ -224,6 +229,7 @@ class ImageUploader(BaseProcessor):
                 self.log('Processing image: %s' % entry['url'])
                 self.proc_image(entry)
 
+            setattr(task, 'task_key', '%s-%s' % (self.name, val['url_hash']))
             self.add_task(task)
 
 
