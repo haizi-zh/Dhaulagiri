@@ -14,63 +14,44 @@ def get_mongodb(db_name, col_name, profile):
     :return:
     """
 
-    cached = getattr(get_mongodb, 'cached', {})
+    cached = getattr(get_mongodb, 'cached', None)
+    if cached is None:
+        cached = {}
+        setattr(get_mongodb, 'cached', cached)
 
-    if profile in cached:
-        client = cached[profile]['client']
-        db_set = cached[profile]['dbset']
-    else:
-        client = None
-        db_set = None
+    client = cached[profile] if profile in cached else None
 
     if not client:
         cfg = load_yaml()
         section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
+        servers = section.get('servers')
 
-        host = section.get('host', 'localhost')
-        port = int(section.get('port', '27017'))
+        def build_node_desc(node_conf):
+            return '%s:%s' % (node_conf['host'], node_conf['port'])
 
         if section.get('replica', False):
             from pymongo import MongoReplicaSetClient
             from pymongo import ReadPreference
 
-            client = MongoReplicaSetClient('%s:%d' % (host, port), replicaSet=section.get('replName'))
-
+            client = MongoReplicaSetClient(','.join(map(build_node_desc, servers)), replicaSet=section.get('replName'))
             pref = section.get('readPref', 'PRIMARY')
             client.read_preference = getattr(ReadPreference, pref)
-
         else:
             from pymongo import MongoClient
 
-            client = MongoClient(host, port)
-
-        cached[profile] = {'client': client}
-        setattr(get_mongodb, 'cached', cached)
-
-    db = client[db_name]
-
-    if not db_set:
-        db_set = set([])
-    if db_name not in db_set:
-        cfg = load_yaml()
-        section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
+            s = servers[0]
+            client = MongoClient(s['host'], s['port'])
 
         auth = section.get('auth')
         if auth:
-            db_auth = filter(lambda v: db_name in v['database'], auth)
-            if db_auth:
-                db_auth = db_auth[0]
-                user = db_auth['user']
-                passwd = db_auth['passwd']
-                credb = client[getattr(auth, 'credb', 'admin')]
-                if user and passwd:
-                    credb.authenticate(name=user, password=passwd)
+            db_auth = auth['credb']
+            user = auth['user']
+            passwd = auth['passwd']
+            client[db_auth].authenticate(name=user, password=passwd)
 
-        db_set.add(db_name)
-        cached[profile]['dbset'] = db_set
-        setattr(get_mongodb, 'cached', cached)
+        cached[profile] = client
 
-    return db[col_name]
+    return client[db_name][col_name]
 
 
 def get_mysql_db(db_name, user=None, passwd=None, profile=None, host='localhost', port=3306):
