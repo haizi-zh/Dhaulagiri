@@ -3,8 +3,8 @@ from hashlib import md5
 import re
 
 import pymongo
-from processors import BaseProcessor
 
+from processors import BaseProcessor
 from utils.database import get_mongodb, get_mysql_db
 
 
@@ -214,7 +214,7 @@ class QunarCommentSpider(BaseProcessor):
         ret_url = url
 
         response = self.request.get(url, allow_redirects=False)
-        if response.is_redirect:
+        if response.status_code in [301, 302]:
             try:
                 ret_url = response.headers['location']
             except KeyError:
@@ -313,7 +313,8 @@ class QunarCommentSpider(BaseProcessor):
                     self.logger.info('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
 
                     try:
-                        response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.validator}})
+                        response = self.request.get(url, timeout=15,
+                                                    user_data={'ProxyMiddleware': {'validator': self.validator}})
                     except IOError:
                         self.logger.warn('Failed to read %s due to IOError' % url)
                         break
@@ -335,6 +336,7 @@ class QunarCommentSpider(BaseProcessor):
                     page += 1
                     continue
 
+            setattr(func, 'task_key', '%s:%d' % (self.name, val['source']['qunar']['id']))
             self.add_task(func)
 
 
@@ -384,7 +386,7 @@ class QunarImageSpider(BaseProcessor):
         if extra_query:
             query = {'$and': [query, extra_query]}
 
-        cursor = col.find(query, {'source.qunar.id':1}).sort('source.qunar.id',pymongo.ASCENDING)
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
