@@ -3,6 +3,7 @@ from middlewares import DownloadMiddleware
 
 __author__ = 'zephyre'
 
+
 class ProxyMiddleware(DownloadMiddleware):
     """
     Proxify traffic
@@ -58,18 +59,19 @@ class ProxyMiddleware(DownloadMiddleware):
         # 被禁用的代理服务器列表
         self.dead_proxies = {}
 
-        self.load_proxies()
-
         from threading import Timer
 
         # 每10分钟刷新一次代理列表
         refresh_interval = 600
 
         def task():
+            manager.engine.logger.debug('Loading proxies...')
             self.load_proxies()
-            Timer(refresh_interval, task, ()).start()
+            t = Timer(refresh_interval, task, ())
+            t.daemon = True
+            t.start()
 
-        Timer(refresh_interval, task, ()).start()
+        task()
 
     def __fetch(self):
         from random import randint
@@ -85,6 +87,8 @@ class ProxyMiddleware(DownloadMiddleware):
             plist = self.proxies.keys()
             proxy = plist[randint(0, len(plist) - 1)]
             self.proxies[proxy]['reqCnt'] += 1
+
+            self._manager.engine.logger.debug('Proxy fetched: %s' % proxy)
             return proxy
         finally:
             self.rw_lock.reader_release()
@@ -143,7 +147,7 @@ class ProxyMiddleware(DownloadMiddleware):
         if 'proxies' in s_args:
             self.add_fail_cnt(s_args['proxies']['http'])
 
-        return True
+        return False
 
     @staticmethod
     def default_validator(response):
