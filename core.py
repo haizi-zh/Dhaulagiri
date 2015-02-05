@@ -77,7 +77,8 @@ class LoggerMixin(object):
         log_level = logging.DEBUG if args.debug else logging.INFO
         handler.setLevel(log_level)
 
-        formatter = Formatter(fmt='%(asctime)s [%(name)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S%z')
+        formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
+                              datefmt='%Y-%m-%d %H:%M:%S%z')
         handler.setFormatter(formatter)
 
         logger.addHandler(handler)
@@ -164,7 +165,7 @@ class DefaultTaskTracker(BaseTaskTracker):
                     from utils import load_yaml
 
                     cfg = load_yaml()
-                    redis_conf = filter(lambda v: v['profile']=='task-track', cfg['redis'])[0]
+                    redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
                     host = redis_conf['host']
                     port = int(redis_conf['port'])
 
@@ -309,6 +310,9 @@ class ProcessorEngine(LoggerMixin):
             for processor in processor_list:
                 self.log('Starting processor %s' % processor.name)
                 processor.run()
+                self.log('Cleaning up processor %s' % processor.name)
+
+        self.log('Cleaning up engine...')
 
 
 class RequestHelper(object):
@@ -320,7 +324,7 @@ class RequestHelper(object):
         return RequestHelper(engine)
 
     def request(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None,
-                timeout=None, allow_redirects=True, proxies=None, hooks=None, json=None, retry=5, user_data=None):
+                hooks=None, json=None, timeout=None, allow_redirects=True, proxies=None, retry=5, user_data=None):
         """Constructs and sends a :class:`Request <Request>`.
         Returns :class:`Response <Response>` object.
 
@@ -354,13 +358,12 @@ class RequestHelper(object):
             mw_list = []
 
         for idx in xrange(retry):
+            session = Session()
+            session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
+            
             try:
                 prepped = Request(method=method, url=url, headers=headers, files=files, data=data, params=params,
-                                  auth=auth, cookies=cookies, hooks=hooks, json=json).prepare()
-
-                session = Session()
-                session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
-
+                                  auth=auth, cookies=cookies, hooks=hooks).prepare()
                 for entry in mw_list:
                     mw = entry['middleware']
                     ret = mw.on_request(prepped, session, session_args, user_data=user_data)
@@ -402,6 +405,6 @@ class RequestHelper(object):
         raise IOError
 
     def get(self, url, retry=10, user_data=None, **kwargs):
-        return self.request('GET', url, retry=retry, user_data=user_data, **kwargs)
+        return self.request(method='GET', url=url, retry=retry, user_data=user_data, **kwargs)
 
 

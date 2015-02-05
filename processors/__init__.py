@@ -14,12 +14,17 @@ class Worker(object):
     __index = 0
 
     def _run(self):
+        import gevent.threading as threading
+
+        self.logger.debug('Worker started: %s' % self.worker_name)
+        g = threading.getcurrent()
+        setattr(g, 'worker_name', self.worker_name)
 
         task_tracker = self.processor.engine.task_tracker
 
         while True:
             self.idle = True
-            self.logger.debug('[#%d] - Retrieving next task...' % self.idx)
+            self.logger.debug('Retrieving next task...')
             try:
                 task = self._task_queue.get(block=True)
             except Empty:
@@ -30,10 +35,10 @@ class Worker(object):
             if task_tracker:
                 # Task tracking机制已启用
                 if task_tracker.track(task):
-                    self.logger.debug('[#%d] - Task %s bypassed'%(self.idx, getattr(task, 'task_key')))
+                    self.logger.info('Task %s bypassed' % getattr(task, 'task_key'))
                     continue
 
-            self.logger.debug('[#%d] - Task started' % self.idx)
+            self.logger.debug('Task started')
             try:
                 ret = task()
                 # 满足一致性。如果ret不是iterable，则将其转换为列表
@@ -53,7 +58,7 @@ class Worker(object):
                 else:
                     self.logger.error('Error occured: unknown', exc_info=True)
 
-            self.logger.debug('[#%d] - Task completed' % self.idx)
+            self.logger.debug('Task completed')
             self.processor.incr_progress()
 
             gevent.sleep(0)
@@ -63,8 +68,9 @@ class Worker(object):
         self.idle = False
         self.processor = processor
         self.logger = processor.logger
-        # worker的编号
+        # worker的编号和名字
         self.idx = idx
+        self.worker_name = 'worker:%d' % self.idx
 
         self.gevent = gevent.spawn(self._run)
 
