@@ -1,4 +1,4 @@
-# encode=utf-8
+# coding=utf-8
 
 import pymongo
 from bson.objectid import ObjectId
@@ -31,16 +31,22 @@ class PoiRank(BaseProcessor):
         fout.close()
         print id_list
 
-        for loc_id in id_list:
-            col_poi = get_mongodb('poi', 'ViewSpot', 'mongo')
-            query = {'taoziEna': True, 'locList._id': ObjectId(loc_id)}
-            cursor = list(col_poi.find(query, {"_id": 1}).sort('hotness', pymongo.DESCENDING))
+        # Restaurant
+        cols = ["Shopping", "Hotel"]
+        for col in cols:
+            print 'Begin %s' % col
+            for loc_id in id_list:
+                col_poi = get_mongodb('poi', col, 'mongo')
+                query = {'taoziEna': True, 'locality._id': ObjectId(loc_id)}
+                cursor = list(col_poi.find(query, {"_id": 1}).sort('hotness', pymongo.DESCENDING))
 
-            if 0 == len(cursor):
-                print ('%s %s can\'t be find with "locList._id"') % (loc_id, id_kv_name[loc_id])
+                if 0 == len(cursor):
+                    print ('%s %s can\'t be find with "locality._id"') % (loc_id, id_kv_name[loc_id])
+                    continue
 
-            for idx, val in enumerate(cursor):
-                def func(entry=val, flag=idx):
-                    col_poi.update({"_id": entry['_id']}, {'$set': {'rank': flag + 1}})
+                for idx, val in enumerate(cursor):
+                    def func(entry=val, flag=idx):
+                        col_poi.update({"_id": entry['_id']}, {'$set': {'rank': flag + 1}})
 
-                self.add_task(func)
+                    self.add_task(func)
+            print '\n'
