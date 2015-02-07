@@ -176,6 +176,104 @@ class QunarPoiProcessor(BaseProcessor):
                 self.add_task(func)
 
 
+class QunarCommentImport(BaseProcessor):
+    """
+    将去哪儿POI的评论导入到数据库中
+    """
+
+    @staticmethod
+    def process_avatar(avatar):
+        avatar = avatar.strip()
+        if not avatar:
+            return None
+
+        from hashlib import md5
+
+        key = md5(avatar).hexdigest()
+        url_hash = key
+
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+
+        url = avatar
+        image = {'url': url, 'key': key, 'url_hash': url_hash}
+
+        if not col_im.find_one({'url_hash': url_hash}, {'_id'}):
+            col_cand.update({'url_hash', url_hash}, {'$set': image})
+
+        return image
+
+    def populate_tasks(self):
+        col_dining = get_mongodb('poi', 'Restaurant', 'mongo')
+        col_shopping = get_mongodb('poi', 'Shopping', 'mongo')
+        col_cmt = get_mongodb('raw_qunar', 'QunarPoiComment', 'mongo')
+
+        poi_id_list = col_cmt.distinct("poi_id")
+
+        for val in poi_id_list:
+            def func(poi_id=val):
+                # 查找poi_id对应的item
+                item = None
+                for col in [col_dining, col_shopping]:
+                    item = col.find_one({'source.qunar.id': poi_id}, {'_id': 1})
+                    if item:
+                        break
+
+                if not item:
+                    return
+
+                for entry in col_cmt.find({'poi_id': poi_id}):
+                    comment = {'source': {'qunar': {'id': poi_id}}, 'itemId': item['_id'], 'rating': entry['rating']}
+                    if 'images' in entry and entry['images']:
+                        images = []
+                        for img in entry['images']:
+                            img_entry = self.process_avatar(img['url'])
+                            if img_entry:
+                                images.append(img_entry)
+                        if images:
+                            comment['images'] = images
+
+                    if 'user_avatar' in entry and entry['user_avatar']:
+                        img_entry = self.process_avatar(entry['user_avatar'])
+                        if img_entry:
+                            comment['authorAvatar'] = img_entry['key']
+
+                    if 'user_name' in entry and entry['user_name']:
+                        pass
+
+        cursor = col_cmt.find(query).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        cursor.skip(self.args.skip)
+
+
+    name = 'qunar-poi-import'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
+        parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
+        args, leftover = parser.parse_known_args()
+        return args
+
+    @staticmethod
+    def validator(response):
+        if response.status_code != 200 or 'security.qunar.com' in response.url:
+            return False
+        try:
+            response.json()['data']
+        except (ValueError, KeyError):
+            return False
+
+        return True
+
+
 class QunarCommentSpider(BaseProcessor):
     """
     调用http://travel.qunar.com/place/api/html/comments/poi/3202964?sortField=1&img=true&pageSize=10&page=1接口，
