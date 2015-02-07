@@ -23,8 +23,12 @@ class Worker(object):
         task_tracker = self.processor.engine.task_tracker
 
         while True:
+            # 状态更新
+            self.processor.update_worker_status(self)
+
             self.idle = True
-            self.logger.debug('Retrieving next task...')
+            self.logger.debug('Retrieving next task... (fetched: %d, success: %d, fail: %d)'
+                              % (self.total_tasks, self.success_cnt, self.fail_cnt))
             try:
                 task = self._task_queue.get(block=True)
             except Empty:
@@ -32,33 +36,48 @@ class Worker(object):
             finally:
                 self.idle = False
 
+            self.processor.update_worker_status(self)
+
+            task_key = getattr(task, 'task_key', None)
+            self.logger.debug('New task%s fetched from the queue. Remaining: %d' %
+                              ('(%s)' % task_key if task_key else '', self._task_queue.qsize()))
+
+            self.total_tasks += 1
+
             if task_tracker:
                 # Task tracking机制已启用
                 if task_tracker.track(task):
-                    self.logger.debug('Task %s bypassed' % getattr(task, 'task_key'))
+                    self.logger.info('Task %s bypassed' % getattr(task, 'task_key'))
                     continue
 
-            self.logger.debug('Task started')
+            self.logger.debug('Task #%d started' % self.total_tasks)
+            # 任务成功的标识
+            success_flag = True
             try:
                 ret = task()
                 # 满足一致性。如果ret不是iterable，则将其转换为列表
                 if not hasattr(ret, '__iter__'):
                     ret = [ret]
-
                 for r in ret:
                     if hasattr(r, '__call__'):
                         # 返回值是一个回调函数
                         self.processor.add_task(r)
-
-                if task_tracker:
-                    task_tracker.update(task)
             except Exception as e:
+                success_flag = False
                 if e.message:
                     self.logger.error('Error occured: %s' % e.message, exc_info=True)
                 else:
                     self.logger.error('Error occured: unknown', exc_info=True)
 
-            self.logger.debug('Task completed')
+            if success_flag:
+                self.success_cnt += 1
+            else:
+                self.fail_cnt += 1
+
+            if success_flag and task_tracker:
+                task_tracker.update(task)
+
+            self.logger.debug('Task #%d completed' % self.total_tasks)
             self.processor.incr_progress()
 
             gevent.sleep(0)
@@ -71,6 +90,13 @@ class Worker(object):
         # worker的编号和名字
         self.idx = idx
         self.worker_name = 'worker:%d' % self.idx
+
+        # 成功统计
+        self.success_cnt = 0
+        # 失败统计
+        self.fail_cnt = 0
+        # 执行任务总数
+        self.total_tasks = 0
 
         self.gevent = gevent.spawn(self._run)
 
@@ -95,8 +121,8 @@ class BaseProcessor(LoggerMixin):
     def __init__(self, engine, *args, **kwargs):
         from time import time
         from hashlib import md5
-        from gevent.queue import Queue
         from threading import Lock
+        from gevent.queue import Queue
 
         self.processor_name = '%s:%s' % (self.name, md5(str(time())).hexdigest()[:6])
 
@@ -131,6 +157,36 @@ class BaseProcessor(LoggerMixin):
         # 心跳任务
         self.heart_beat = None
 
+        # worker的Monitor。Worker在每次循环开始的时候，都会在该对象中进行一次状态更新
+        self.worker_monitor = {}
+
+    def update_worker_status(self, worker):
+        """
+        更新worker的状态
+        :param worker:
+        :return:
+        """
+        from time import time
+
+        name = worker.worker_name
+        self.worker_monitor[name] = time()
+
+    def get_worker_stat(self):
+        """
+        获得worker队列的状态
+        :return:
+        """
+        from time import time
+
+        # 如果60秒都没有状态更新，说明该worker进入zombie状态
+        time_window = 90
+
+        cur = time()
+        active = dict(filter(lambda item: item[1] >= cur - time_window, self.worker_monitor.items()))
+        zombie = dict(filter(lambda item: item[1] < cur - time_window, self.worker_monitor.items()))
+
+        return {'zombie': zombie, 'active': active}
+
     def incr_progress(self):
         self.progress += 1
 
@@ -152,6 +208,10 @@ class BaseProcessor(LoggerMixin):
                 self.checkpoint_ts = cts
                 self.checkpoint_prog = self.progress
 
+                # 获得worker monitor统计
+                stat = self.get_worker_stat()
+                msg += ', active workers: %d, zombie workers: %d' % (len(stat['active']), len(stat['zombie']))
+
                 self.log(msg)
                 gevent.sleep(30)
 
@@ -165,7 +225,9 @@ class BaseProcessor(LoggerMixin):
             self.workers.append(worker)
 
     def add_task(self, task, *args, **kwargs):
-        while True:
+        # 是否启用流量控制
+        flow_control = False
+        while flow_control:
             # 如果self.tasks中的项目过多，则暂停添加
             if self.tasks.qsize() > self.maxsize:
                 gevent.sleep(self.polling_interval)
@@ -177,6 +239,8 @@ class BaseProcessor(LoggerMixin):
         if task_key:
             setattr(func, 'task_key', task_key)
         self.tasks.put(func, timeout=120)
+        self.logger.debug('New task%s added to the queue. Remaining: %d' % ('(%s)' % task_key if task_key else '',
+                                                                            self.tasks.qsize()))
         gevent.sleep(0)
 
     def _wait_for_workers(self):
