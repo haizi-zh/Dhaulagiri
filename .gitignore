@@ -61,3 +61,6 @@ qiniu.cfg
 mongo.cfg
 *.yaml
 sandbox.py
+
+# temp data file
+tempfile/
