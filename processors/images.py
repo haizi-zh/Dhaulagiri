@@ -82,12 +82,16 @@ class ImageUploader(BaseProcessor):
         """
         Called on failure
         """
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        err_msg = 'Processing failed for image: %s' % entry['key']
+        if 'failCnt' in entry:
+            err_msg += ', failCnt: %d' % entry['failCnt']
+        self.logger.warn(err_msg)
 
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
-        self.logger.warn('Processing failed for image: %s, failCnt: %d' % (entry['key'], entry['failCnt']))
+
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
@@ -101,7 +105,7 @@ class ImageUploader(BaseProcessor):
         bucket = image['bucket']
 
         sc = False
-        self.log('START UPLOADING: %s <= %s' % (key, response.url), logging.INFO)
+        self.logger.info('START UPLOADING: %s <= %s' % (key, response.url))
 
         token = self.auth().upload_token(bucket, key)
 
@@ -162,25 +166,28 @@ class ImageUploader(BaseProcessor):
 
     def proc_image(self, entry):
         """
-        Process the imaeg item
+        Process the image item
         """
+        self.logger.debug('Getting MongoDB clients...')
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_im = get_mongodb('imagestore', 'Images', 'mongo')
 
         entry['key'] = entry['url_hash']
         entry['bucket'] = 'aizou'
 
+        self.logger.debug('Chekcing existence for %s' % entry['key'])
         if self.check_exist(entry):
+            self.logger.debug('Image already exists: url=%s, key=%s' % (entry['url'], entry['key']))
             col_cand.remove({'_id': entry['_id']})
             return
 
+        self.logger.debug('Trying to download the image: %s' % entry['url'])
         url = entry['url']
         try:
-            response = requests.get(url)
+            response = self.request.get(url, timeout=20)
             if response.status_code != 200:
-                self.log('Failed to download download image (code=%d): key=%s, url=%s' % (
-                    response.status_code, entry['key'], entry['url']),
-                         logging.WARN)
+                self.logger.warn('Failed to download download image (code=%d): key=%s, url=%s' % (
+                    response.status_code, entry['key'], entry['url']))
                 raise IOError
 
             self.upload_image(entry, response)
