@@ -438,6 +438,55 @@ class QunarCommentSpider(BaseProcessor):
             self.add_task(func)
 
 
+class QunarImageImporter(BaseProcessor):
+    """
+    设置好去哪儿POI的图像
+    """
+
+    name = 'qunar-image-importer'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
+        args, leftover = parser.parse_known_args()
+        return args
+
+    def populate_tasks(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
+        col = get_mongodb('poi', col_name, 'mongo')
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+
+        cursor = col.find({}, {'_id': True})
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        cursor.skip(self.args.skip)
+        cursor.sort('hotness', pymongo.DESCENDING)
+
+        for entry in cursor:
+            oid = entry['_id']
+
+            def func(entry_id=oid):
+                max_images_cnt = 5
+                ret = list(
+                    col_im.find({'itemIds': entry_id}, {'key': 1, 'meta': 1}).sort('ord', pymongo.ASCENDING).limit(
+                        max_images_cnt))
+                if ret:
+                    images = []
+                    for tmp in ret:
+                        del tmp['_id']
+                        images.append(tmp)
+                    col.update({'_id': entry_id}, {'$set': {'images': images}})
+
+            setattr(func, 'task_key', 'qunar-image-importer-%s' % oid)
+            self.add_task(func)
+
+
 class QunarImageSpider(BaseProcessor):
     """
     调用http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=3202964接口，
