@@ -181,6 +181,8 @@ class QunarCommentImport(BaseProcessor):
     将去哪儿POI的评论导入到数据库中
     """
 
+    name = 'qunar-comment-importer'
+
     @staticmethod
     def process_avatar(avatar):
         avatar = avatar.strip()
@@ -239,7 +241,9 @@ class QunarCommentImport(BaseProcessor):
                             comment['authorAvatar'] = img_entry['key']
 
                     if 'user_name' in entry and entry['user_name']:
-                        pass
+                        comment['authorName'] = entry['user_name']
+
+
 
         cursor = col_cmt.find(query).sort('source.qunar.id', pymongo.ASCENDING)
         if self.args.limit:
