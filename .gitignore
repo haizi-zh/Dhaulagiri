@@ -55,7 +55,6 @@ docs/_build/
 # PyBuilder
 target/
 
-
 .idea
 qiniu.cfg
 mongo.cfg
