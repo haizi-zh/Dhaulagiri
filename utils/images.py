@@ -8,6 +8,7 @@ class MfwImageExtractor(object):
     """
     Extract image urls from Mafengwo records
     """
+
     def __init__(self):
         def helper(image_id, src):
             key = hashlib.md5(src).hexdigest()
@@ -37,6 +38,7 @@ class BaiduImageExtractor(object):
     """
     Extract image urls from Baidu records
     """
+
     def __init__(self):
         def helper(image_id, src):
             key = hashlib.md5(src).hexdigest()

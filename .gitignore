@@ -55,8 +55,11 @@ docs/_build/
 # PyBuilder
 target/
 
-
 .idea
 qiniu.cfg
 mongo.cfg
 *.yaml
+sandbox.py
+
+# temp data file
+tempfile/

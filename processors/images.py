@@ -7,11 +7,10 @@ from hashlib import md5
 import gevent
 import pymongo
 from pymongo.errors import DuplicateKeyError
+import requests
 
 from processors import BaseProcessor
 from utils.database import get_mongodb
-
-import requests
 
 
 __author__ = 'zephyre'
@@ -33,7 +32,9 @@ class ImageUploader(BaseProcessor):
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--url-filter', type=str)
-        return parser.parse_args()
+        parser.add_argument('--query', type=str)
+        args, leftover = parser.parse_known_args()
+        return args
 
     @staticmethod
     def check_exist(entry):
@@ -77,16 +78,20 @@ class ImageUploader(BaseProcessor):
 
         return q
 
-    @staticmethod
-    def on_failure(entry):
+    def on_failure(self, entry):
         """
         Called on failure
         """
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        err_msg = 'Processing failed for image: %s' % entry['key']
+        if 'failCnt' in entry:
+            err_msg += ', failCnt: %d' % entry['failCnt']
+        self.logger.warn(err_msg)
 
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
+
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
@@ -100,7 +105,7 @@ class ImageUploader(BaseProcessor):
         bucket = image['bucket']
 
         sc = False
-        self.log('START UPLOADING: %s <= %s' % (key, response.url), logging.INFO)
+        self.logger.info('START UPLOADING: %s <= %s' % (key, response.url))
 
         token = self.auth().upload_token(bucket, key)
 
@@ -161,33 +166,39 @@ class ImageUploader(BaseProcessor):
 
     def proc_image(self, entry):
         """
-        Process the imaeg item
+        Process the image item
         """
+        self.logger.debug('Getting MongoDB clients...')
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_im = get_mongodb('imagestore', 'Images', 'mongo')
 
         entry['key'] = entry['url_hash']
         entry['bucket'] = 'aizou'
 
+        self.logger.debug('Chekcing existence for %s' % entry['key'])
         if self.check_exist(entry):
+            self.logger.debug('Image already exists: url=%s, key=%s' % (entry['url'], entry['key']))
             col_cand.remove({'_id': entry['_id']})
             return
 
+        self.logger.debug('Trying to download the image: %s' % entry['url'])
         url = entry['url']
         try:
-            response = requests.get(url)
+            response = self.request.get(url, timeout=20)
             if response.status_code != 200:
-                self.log('Failed to download download image (code=%d): key=%s, url=%s' % (
-                    response.status_code, entry['key'], entry['url']),
-                         logging.WARN)
+                self.logger.warn('Failed to download download image (code=%d): key=%s, url=%s' % (
+                    response.status_code, entry['key'], entry['url']))
                 raise IOError
 
             self.upload_image(entry, response)
             self.fetch_stat(entry)
             self.fetch_info(entry)
 
+            image_id = entry.pop('_id')
+            if 'failCnt' in entry:
+                entry.pop('failCnt')
             col_im.update({'url_hash': entry['url_hash']}, {'$set': entry}, upsert=True)
-            col_cand.remove({'_id': entry['_id']})
+            col_cand.remove({'_id': image_id})
 
         except IOError:
             self.on_failure(entry)
@@ -196,14 +207,26 @@ class ImageUploader(BaseProcessor):
     def populate_tasks(self):
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
 
-        cursor = col_cand.find({'$or': [{'failCnt': None}, {'failCnt': {'$lt': 5}}]}, snapshot=True)
+        query = {'failCnt': {'$not': {'$gte': 5}}}
+
+        from bson import ObjectId
+
+        if False:
+            return ObjectId()
+
+        extra_query = eval(self.args.query) if self.args.query else {}
+
+        if extra_query:
+            query = {'$and': [query, extra_query]}
+
+        cursor = col_cand.find(query, snapshot=True)  # .sort('_id', pymongo.DESCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
 
         for val in cursor:
-            def task(entry=val):
 
+            def task(entry=val):
                 if self.args.url_filter:
                     pattern = self.args.url_filter
                     if not re.match(pattern, entry['url']):
@@ -213,6 +236,7 @@ class ImageUploader(BaseProcessor):
                 self.log('Processing image: %s' % entry['url'])
                 self.proc_image(entry)
 
+            setattr(task, 'task_key', '%s-%s' % (self.name, val['url_hash']))
             self.add_task(task)
 
 
