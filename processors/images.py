@@ -33,6 +33,7 @@ class ImageUploader(BaseProcessor):
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--url-filter', type=str)
         parser.add_argument('--query', type=str)
+        parser.add_argument('--fetch', action='store_true')
         args, leftover = parser.parse_known_args()
         return args
 
@@ -121,6 +122,44 @@ class ImageUploader(BaseProcessor):
             raise IOError
         self.log('UPLOADING COMPLETED: %s' % key, logging.INFO)
 
+    def download_upload(self, entry):
+        """
+        采用本地下载-上传的模式
+        """
+        self.logger.debug('Downloading image: %s' % entry['url'])
+        url = entry['url']
+
+        response = self.request.get(url, timeout=20)
+        if response.status_code != 200:
+            self.logger.warn('Failed to download the image (code=%d): key=%s, url=%s' % (
+                response.status_code, entry['key'], entry['url']))
+            raise IOError
+
+        self.upload_image(entry, response)
+
+    def fetch(self, entry):
+        """
+        采用七牛fetch的模式
+        """
+        self.logger.debug('Fetching the image: %s' % entry['url'])
+        url = entry['url']
+
+        key = entry['key']
+        bucket = entry['bucket']
+
+        from qiniu import BucketManager
+
+        bucket_mgr = BucketManager(self.auth())
+        fetch_result = bucket_mgr.fetch(url, bucket, key)
+        status_code = None
+        try:
+            status_code = fetch_result[1].status_code
+            if fetch_result[1].exception is not None or status_code != 200:
+                raise IOError
+        except (IndexError, IOError, AttributeError) as e:
+            self.log('Error fetching image: %s, status: %d' % (url, status_code))
+            raise e
+
     def fetch_stat(self, entry):
         """
         Get stat for the image
@@ -181,17 +220,14 @@ class ImageUploader(BaseProcessor):
             col_cand.remove({'_id': entry['_id']})
             return
 
-        self.logger.debug('Trying to download the image: %s' % entry['url'])
-        url = entry['url']
-        try:
-            response = self.request.get(url, timeout=20)
-            if response.status_code != 200:
-                self.logger.warn('Failed to download download image (code=%d): key=%s, url=%s' % (
-                    response.status_code, entry['key'], entry['url']))
-                raise IOError
+        # 两种下载模式：本地下载-上传，以及七牛fetch
+        func = self.fetch if self.args.fetch else self.download_upload
 
-            self.upload_image(entry, response)
+        try:
+            func(entry)
             self.fetch_stat(entry)
+            if not entry['type'].startswith('image/'):
+                raise IOError
             self.fetch_info(entry)
 
             image_id = entry.pop('_id')
@@ -206,20 +242,13 @@ class ImageUploader(BaseProcessor):
 
     def populate_tasks(self):
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
-
         query = {'failCnt': {'$not': {'$gte': 5}}}
 
-        from bson import ObjectId
-
-        if False:
-            return ObjectId()
-
         extra_query = eval(self.args.query) if self.args.query else {}
-
         if extra_query:
             query = {'$and': [query, extra_query]}
 
-        cursor = col_cand.find(query, snapshot=True)  # .sort('_id', pymongo.DESCENDING)
+        cursor = col_cand.find(query, snapshot=True)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
