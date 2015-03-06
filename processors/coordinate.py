@@ -43,8 +43,8 @@ class Coordings(BaseProcessor):
     def baidu_mc_to_ll(self, latlnglist):
         """
         百度米制坐标转换为百度经纬度坐标
-        :param latlnglist: ['lat+lng', ...]
-        :return: ['lat+lng', ...]
+        :param latlnglist: ['lat,lng', ...]
+        :return: ['lat,lng', ...]
         """
         if 0 == len(latlnglist):
             return []
@@ -65,8 +65,8 @@ class Coordings(BaseProcessor):
     def baidu_ll_to_google(self, latlnglist):
         """
         百度经纬度坐标转换为谷歌地图坐标
-        :param latlnglist: ['lat+lng', ...]
-        :return: ['lat+lng', ...]
+        :param latlnglist: ['lat,lng', ...]
+        :return: ['lat,lng', ...]
         """
         if 0 == len(latlnglist):
             return []
