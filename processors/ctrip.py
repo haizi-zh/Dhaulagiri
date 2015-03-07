@@ -36,10 +36,8 @@ class CtripQuestionClean(BaseProcessor):
 
     def populate_tasks(self):
         cq = get_mongodb('raw_faq', 'CtripQuestion', 'mongo-raw')
-        ca = get_mongodb('raw_faq', 'CtripAnswer' , 'mongo-raw')
-        cq_c = get_mongodb('raw_faq', 'CtripQuestion_Clean', 'mongo-raw')
+        cq_c = get_mongodb('raw_faq', 'CtripClean', 'mongo-raw')
         cq_cursor = cq.find()
-        ca_cursor = ca.find()
 
         for cq_list in cq_cursor:
 
@@ -67,7 +65,7 @@ class CtripQuestionClean(BaseProcessor):
                 postType =  "question"
 
 
-                question = {'q_id' : q_id,'title' :title,'author' : username,'time': publictime,'content' : content,
+                question = {'q_id' : q_id,'source':'ctrip','source_id':q_id,'title' :title,'author' : username,'time': publictime,'content' : content,
                             'tags':tags, 'avatar': None,'authorId':None, 'essence':None ,'favorCnt':None,
                             'postType':postType}
                 cq_c.update({'q_id':q_id},{'$set': question},upsert=True)
@@ -94,16 +92,14 @@ class CtripAnswerClean(BaseProcessor):
 
     def populate_tasks(self):
         ca = get_mongodb('raw_faq', 'CtripAnswer' , 'mongo-raw')
-        ca_c = get_mongodb('raw_faq', 'CtripAnswer_Clean', 'mongo-raw')
+        ca_c = get_mongodb('raw_faq', 'CtripClean', 'mongo-raw')
         ca_cursor = ca.find()
 
-        for cq_list in ca_cursor:
+        for ca_list in ca_cursor:
 
             import time
-            def task(val = cq_list):
+            def task(val = ca_list):
                 q_id = int(val['q_id'])
-                question = {}
-                print val['body']
                 dom = soupparser.fromstring(val['body'])
 
                 username = dom[0].xpath('//a[@class = "answer_id"]/text()')[0]
@@ -132,10 +128,10 @@ class CtripAnswerClean(BaseProcessor):
                     favorCnt = 0
                 avatar = 'http://you.ctrip.com' + dom[0].xpath('//a[@class = "answer_img"]/@href')[0]
 
-                answer = {'q_id' : q_id,'title' :title,'author' : username,'time': publictime,'content' : content,
+                answer = {'q_id' : q_id,'source':'ctrip','source_id':val['a_id'],'title' :title,'author' : username,'time': publictime,'content' : content,
                             'tags':None, 'avatar': avatar,'authorId':userid, 'essence':essence ,'favorCnt':favorCnt,
                             'postType':postType}
-                ca_c.update({'content':content},{'$set':answer},upsert =True)
+                ca_c.update({'source_id':answer['source_id']},{'$set':answer},upsert =True)
 
             self.add_task(task)
 
