@@ -1,4 +1,5 @@
 # coding=utf-8
+import logging
 import re
 from lxml import etree
 
@@ -17,7 +18,7 @@ class BaseFactory(object):
 class QunarFactory(BaseFactory):
     def generator(self):
         col = get_mongodb('raw_data', 'QunarPoi', 'mongo-raw')
-        for entry in col.find({'distName': u'北京'}, {'lat': 1, 'lng': 1, 'distName': 1, 'name': 1}):
+        for entry in col.find({'distName': u'北京'}, {'lat': 1, 'lng': 1, 'distName': 1, 'name': 1}).limit(10):
             yield {'name': entry['name'], 'locality': entry['distName'],
                    'coordinate': {'lat': entry['lat'], 'lng': entry['lng']}}
 
@@ -68,6 +69,7 @@ class DianpingProcessor(BaseProcessor):
         pass
 
     def populate_tasks(self):
+        col = get_mongodb('raw_faq', 'CtripAnswer', 'mongo-raw')
         populator = FactoryBuilder().get_factory('qunar')
         cursor = populator.generator()
 
@@ -88,7 +90,9 @@ class DianpingProcessor(BaseProcessor):
                     shop_id = int(match.group(1))
 
                     def fetch_shop_details(val=shop_id):
-                        shop_resposne = self.request.get('http://www.dianping.com/shop/%d' % val)
+                        shop_url = 'http://www.dianping.com/shop/%d' % val
+                        self.log('Processing %s' % shop_url, logging.DEBUG)
+                        shop_resposne = self.request.get(shop_url)
                         self.parse_shop_details(shop_resposne)
 
                     yield fetch_shop_details
