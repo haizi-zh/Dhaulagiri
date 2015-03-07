@@ -323,6 +323,14 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
+    @staticmethod
+    def get_default_header():
+        return {'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/40.0.2214.115 Safari/537.36',
+                'Accept-Encoding': 'gzip, deflate, sdch',
+                'Accept-Language': 'en,zh-CN;q=0.8,zh;q=0.6,zh-TW;q=0.4,en-US;q=0.2'}
+
     def request(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None,
                 hooks=None, json=None, timeout=None, allow_redirects=True, proxies=None, retry=5, user_data=None):
         """Constructs and sends a :class:`Request <Request>`.
@@ -360,8 +368,10 @@ class RequestHelper(object):
         for idx in xrange(retry):
             session = Session()
             session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
-            
+
             try:
+                if not headers:
+                    headers = self.get_default_header()
                 prepped = Request(method=method, url=url, headers=headers, files=files, data=data, params=params,
                                   auth=auth, cookies=cookies, hooks=hooks).prepare()
                 for entry in mw_list:
