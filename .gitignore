@@ -55,8 +55,10 @@ docs/_build/
 # PyBuilder
 target/
 
-
 .idea
 *.cfg
 *.yaml
 sandbox.py
+
+# temp data file
+tempfile/

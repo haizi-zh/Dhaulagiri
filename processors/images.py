@@ -33,6 +33,7 @@ class ImageUploader(BaseProcessor):
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--url-filter', type=str)
         parser.add_argument('--query', type=str)
+        parser.add_argument('--fetch', action='store_true')
         args, leftover = parser.parse_known_args()
         return args
 
@@ -82,12 +83,16 @@ class ImageUploader(BaseProcessor):
         """
         Called on failure
         """
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        err_msg = 'Processing failed for image: %s' % entry['key']
+        if 'failCnt' in entry:
+            err_msg += ', failCnt: %d' % entry['failCnt']
+        self.logger.warn(err_msg)
 
         if 'failCnt' not in entry:
             entry['failCnt'] = 0
         entry['failCnt'] += 1
-        self.logger.warn('Processing failed for image: %s, failCnt: %d' % (entry['key'], entry['failCnt']))
+
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_cand.update({'_id': entry['_id']}, {'$set': {'failCnt': entry['failCnt']}})
 
     def upload_image(self, entry, response):
@@ -101,7 +106,7 @@ class ImageUploader(BaseProcessor):
         bucket = image['bucket']
 
         sc = False
-        self.log('START UPLOADING: %s <= %s' % (key, response.url), logging.INFO)
+        self.logger.info('START UPLOADING: %s <= %s' % (key, response.url))
 
         token = self.auth().upload_token(bucket, key)
 
@@ -116,6 +121,44 @@ class ImageUploader(BaseProcessor):
         if not sc:
             raise IOError
         self.log('UPLOADING COMPLETED: %s' % key, logging.INFO)
+
+    def download_upload(self, entry):
+        """
+        采用本地下载-上传的模式
+        """
+        self.logger.debug('Downloading image: %s' % entry['url'])
+        url = entry['url']
+
+        response = self.request.get(url, timeout=20)
+        if response.status_code != 200:
+            self.logger.warn('Failed to download the image (code=%d): key=%s, url=%s' % (
+                response.status_code, entry['key'], entry['url']))
+            raise IOError
+
+        self.upload_image(entry, response)
+
+    def fetch(self, entry):
+        """
+        采用七牛fetch的模式
+        """
+        self.logger.debug('Fetching the image: %s' % entry['url'])
+        url = entry['url']
+
+        key = entry['key']
+        bucket = entry['bucket']
+
+        from qiniu import BucketManager
+
+        bucket_mgr = BucketManager(self.auth())
+        fetch_result = bucket_mgr.fetch(url, bucket, key)
+        status_code = None
+        try:
+            status_code = fetch_result[1].status_code
+            if fetch_result[1].exception is not None or status_code != 200:
+                raise IOError
+        except (IndexError, IOError, AttributeError) as e:
+            self.log('Error fetching image: %s, status: %d' % (url, status_code))
+            raise e
 
     def fetch_stat(self, entry):
         """
@@ -162,29 +205,29 @@ class ImageUploader(BaseProcessor):
 
     def proc_image(self, entry):
         """
-        Process the imaeg item
+        Process the image item
         """
+        self.logger.debug('Getting MongoDB clients...')
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         col_im = get_mongodb('imagestore', 'Images', 'mongo')
 
         entry['key'] = entry['url_hash']
         entry['bucket'] = 'aizou'
 
+        self.logger.debug('Chekcing existence for %s' % entry['key'])
         if self.check_exist(entry):
+            self.logger.debug('Image already exists: url=%s, key=%s' % (entry['url'], entry['key']))
             col_cand.remove({'_id': entry['_id']})
             return
 
-        url = entry['url']
-        try:
-            response = requests.get(url)
-            if response.status_code != 200:
-                self.log('Failed to download download image (code=%d): key=%s, url=%s' % (
-                    response.status_code, entry['key'], entry['url']),
-                         logging.WARN)
-                raise IOError
+        # 两种下载模式：本地下载-上传，以及七牛fetch
+        func = self.fetch if self.args.fetch else self.download_upload
 
-            self.upload_image(entry, response)
+        try:
+            func(entry)
             self.fetch_stat(entry)
+            if not entry['type'].startswith('image/'):
+                raise IOError
             self.fetch_info(entry)
 
             image_id = entry.pop('_id')
@@ -199,15 +242,13 @@ class ImageUploader(BaseProcessor):
 
     def populate_tasks(self):
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
-
         query = {'failCnt': {'$not': {'$gte': 5}}}
 
         extra_query = eval(self.args.query) if self.args.query else {}
-
         if extra_query:
             query = {'$and': [query, extra_query]}
 
-        cursor = col_cand.find(query, snapshot=True)  # .sort('_id', pymongo.DESCENDING)
+        cursor = col_cand.find(query, snapshot=True)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
@@ -224,6 +265,7 @@ class ImageUploader(BaseProcessor):
                 self.log('Processing image: %s' % entry['url'])
                 self.proc_image(entry)
 
+            setattr(task, 'task_key', '%s-%s' % (self.name, val['url_hash']))
             self.add_task(task)
 
 

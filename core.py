@@ -1,5 +1,7 @@
 # coding=utf-8
 import logging
+import re
+from time import time
 
 from gevent.lock import BoundedSemaphore
 
@@ -49,7 +51,12 @@ class LoggerMixin(object):
         name = getattr(self, 'name', 'general_logger')
 
         # Set up a specific logger with our desired output level
-        logger = logging.getLogger(name)
+        from hashlib import md5
+        from random import randint
+        import sys
+
+        sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
+        logger = logging.getLogger('%s-%s' % (name, sig))
 
         if args.verbose:
             handler = StreamHandler()
@@ -70,13 +77,107 @@ class LoggerMixin(object):
         log_level = logging.DEBUG if args.debug else logging.INFO
         handler.setLevel(log_level)
 
-        formatter = Formatter(fmt='%(asctime)s [%(name)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S%z')
+        formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
+                              datefmt='%Y-%m-%d %H:%M:%S%z')
         handler.setFormatter(formatter)
 
         logger.addHandler(handler)
         logger.setLevel(log_level)
 
         return logger
+
+
+class TaskTrackerFactory(object):
+    @classmethod
+    def get_instance(cls, tracker_name, expire):
+        return DefaultTaskTracker(expire)
+
+
+class BaseTaskTracker(object):
+    """
+    记录某个任务是否被执行
+    """
+
+    def track(self, task):
+        """
+        如果task可以bypass，则返回True
+
+        :param task:
+        :return:
+        """
+        raise NotImplementedError
+
+    def update(self, task):
+        """
+        更新task的tracking信息
+        :param task:
+        :return:
+        """
+        raise NotImplementedError
+
+
+class DefaultTaskTracker(BaseTaskTracker):
+    def __init__(self, expire):
+        BaseTaskTracker.__init__(self)
+
+        self.__redis = None
+        self.expire = expire
+
+        from threading import Lock
+
+        self.__redis_lock = Lock()
+
+    def track(self, task):
+        r = self.redis
+
+        if not r:
+            return False
+
+        task_key = getattr(task, 'task_key', None)
+        if not task_key:
+            return False
+
+        ret = r.get(task_key)
+        if not ret:
+            return False
+        else:
+            # 判断是否过期
+            return time() < float(ret) + self.expire
+
+    def update(self, task):
+        r = self.redis
+        if not r:
+            return False
+
+        task_key = getattr(task, 'task_key', None)
+        if not task_key:
+            return
+
+        r.set(task_key, time())
+
+    def __get_redis(self):
+        if not self.__redis:
+            try:
+                self.__redis_lock.acquire()
+                if not self.__redis:
+                    import redis
+
+                    from utils import load_yaml
+
+                    cfg = load_yaml()
+                    redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+                    host = redis_conf['host']
+                    port = int(redis_conf['port'])
+
+                    self.__redis = redis.StrictRedis(host=host, port=port, db=0)
+            except (KeyError, IOError, IndexError):
+                self.__redis = None
+            finally:
+                self.__redis_lock.release()
+
+        return self.__redis
+
+    redis = property(__get_redis)
 
 
 class ProcessorEngine(LoggerMixin):
@@ -143,6 +244,26 @@ class ProcessorEngine(LoggerMixin):
 
         return processor_dict
 
+    @staticmethod
+    def parse_tracking(args):
+        # 默认有效期为1天
+        expire = 3600 * 24
+
+        if args.track_exp:
+            match = re.search(r'([\d\.]+)(\w)', args.track_exp)
+            val = float(match.group(1))
+            unit = match.group(2)
+            if unit == 'd':
+                expire = val * 3600 * 24
+            elif unit == 'h':
+                expire = val * 3600
+            elif unit == 'm':
+                expire = val * 60
+            elif unit == 's':
+                expire = val
+
+        return TaskTrackerFactory.get_instance(args.track, expire) if args.track else None
+
     def __init__(self):
         import argparse
         from utils import load_yaml
@@ -153,9 +274,14 @@ class ProcessorEngine(LoggerMixin):
 
         # Base argument parser
         parser = argparse.ArgumentParser()
-        parser.add_argument('cmd', type=str)
-
+        parser.add_argument('--track', action='store_true')
+        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
+        parser.add_argument('--track-exp', default=None, type=str)
+        args, leftover = parser.parse_known_args()
         self.arg_parser = parser
+
+        # 获得TaskTracker
+        self.task_tracker = self.parse_tracking(args)
 
         self.request = RequestHelper.from_engine(self)
         self.middleware_manager = MiddlewareManager.from_engine(self)
@@ -184,6 +310,9 @@ class ProcessorEngine(LoggerMixin):
             for processor in processor_list:
                 self.log('Starting processor %s' % processor.name)
                 processor.run()
+                self.log('Cleaning up processor %s' % processor.name)
+
+        self.log('Cleaning up engine...')
 
 
 class RequestHelper(object):
@@ -194,42 +323,71 @@ class RequestHelper(object):
     def from_engine(cls, engine):
         return RequestHelper(engine)
 
-    def get(self, url, retry=10, user_data=None, **kwargs):
+    @staticmethod
+    def get_default_header():
+        return {'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/40.0.2214.115 Safari/537.36',
+                'Accept-Encoding': 'gzip, deflate, sdch',
+                'Accept-Language': 'en,zh-CN;q=0.8,zh;q=0.6,zh-TW;q=0.4,en-US;q=0.2'}
+
+    def request(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None,
+                hooks=None, json=None, timeout=None, allow_redirects=True, proxies=None, retry=5, user_data=None):
+        """Constructs and sends a :class:`Request <Request>`.
+        Returns :class:`Response <Response>` object.
+
+        :param method: method for the new :class:`Request` object.
+        :param url: URL for the new :class:`Request` object.
+        :param params: (optional) Dictionary or bytes to be sent in the query string for the :class:`Request`.
+        :param data: (optional) Dictionary, bytes, or file-like object to send in the body of the :class:`Request`.
+        :param json: (optional) json data to send in the body of the :class:`Request`.
+        :param headers: (optional) Dictionary of HTTP Headers to send with the :class:`Request`.
+        :param cookies: (optional) Dict or CookieJar object to send with the :class:`Request`.
+        :param files: (optional) Dictionary of ``'name': file-like-objects`` (or ``{'name': ('filename', fileobj)}``) for multipart encoding upload.
+        :param auth: (optional) Auth tuple to enable Basic/Digest/Custom HTTP Auth.
+        :param timeout: (optional) How long to wait for the server to send data
+            before giving up, as a float, or a (`connect timeout, read timeout
+            <user/advanced.html#timeouts>`_) tuple.
+        :type timeout: float or tuple
+        :param allow_redirects: (optional) Boolean. Set to True if POST/PUT/DELETE redirect following is allowed.
+        :type allow_redirects: bool
+        :param proxies: (optional) Dictionary mapping protocol to the URL of the proxy.
+
+        Usage::
+
+        """
+
         from requests import Request, Session
 
+        mw_manager = getattr(self._engine, 'middleware_manager', {})
+        if mw_manager and 'download' in mw_manager.mw_dict:
+            mw_list = self._engine.middleware_manager.mw_dict['download']
+        else:
+            mw_list = []
+
         for idx in xrange(retry):
+            session = Session()
+            session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
+
             try:
-                req = Request(method='GET', url=url, headers=kwargs['headers'] if 'headers' in kwargs else None,
-                              data=kwargs['data'] if 'data' in kwargs else None,
-                              params=kwargs['params'] if 'params' in kwargs else None,
-                              auth=kwargs['auth'] if 'auth' in kwargs else None,
-                              cookies=kwargs['cookies'] if 'cookies' in kwargs else None)
-                prepped = req.prepare()
-
-                s = Session()
-                s_args = {}
-
-                mw_manager = getattr(self._engine, 'middleware_manager', {})
-
-                if mw_manager and 'download' in mw_manager.mw_dict:
-                    mw_list = self._engine.middleware_manager.mw_dict['download']
-                else:
-                    mw_list = []
-
+                if not headers:
+                    headers = self.get_default_header()
+                prepped = Request(method=method, url=url, headers=headers, files=files, data=data, params=params,
+                                  auth=auth, cookies=cookies, hooks=hooks).prepare()
                 for entry in mw_list:
                     mw = entry['middleware']
-                    ret = mw.on_request(prepped, s, s_args)
-                    prepped, s, s_args = ret['value']
+                    ret = mw.on_request(prepped, session, session_args, user_data=user_data)
+                    prepped, session, session_args = ret['value']
                     pass_next = ret['next']
                     if not pass_next:
                         break
 
                 try:
-                    response = s.send(prepped, **s_args)
+                    response = session.send(prepped, **session_args)
                 except IOError as e:
                     for entry in mw_list:
                         mw = entry['middleware']
-                        pass_next = mw.on_failure(prepped, s_args)
+                        pass_next = mw.on_failure(prepped, session_args)
                         if not pass_next:
                             break
                     raise e
@@ -254,6 +412,9 @@ class RequestHelper(object):
                 else:
                     raise e
 
-        return None
+        raise IOError
+
+    def get(self, url, retry=10, user_data=None, **kwargs):
+        return self.request(method='GET', url=url, retry=retry, user_data=user_data, **kwargs)
 
 
