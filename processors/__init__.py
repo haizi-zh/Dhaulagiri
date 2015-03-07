@@ -122,7 +122,7 @@ class BaseProcessor(LoggerMixin):
         from time import time
         from hashlib import md5
         from threading import Lock
-        from gevent.queue import Queue
+        from gevent.queue import LifoQueue
 
         self.processor_name = '%s:%s' % (self.name, md5(str(time())).hexdigest()[:6])
 
@@ -137,7 +137,7 @@ class BaseProcessor(LoggerMixin):
         self.total = 0
         # 超过这一限制时，add_task就暂停向其中添加任务
         self.maxsize = 1000
-        self.tasks = Queue()
+        self.tasks = LifoQueue()
         self.workers = []
 
         # 默认的polling间隔为1秒
