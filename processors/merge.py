@@ -219,4 +219,42 @@ class BaiduMergeProcessor(BaseProcessor):
             self.add_task(func)
 
 
+class CMSMerger(BaseProcessor):
+    name = 'cms-merger'
 
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+
+    def sync_images(self):
+        """
+        同步图像编辑状态
+        :return:
+        """
+        src_col = get_mongodb('poi', 'ViewSpot', 'mongo')
+        dst_col = get_mongodb('poi', 'ViewSpot', 'mongo-cms')
+        cursor = src_col.find({}, {'isDone': 1, 'images': 1})
+
+        for val in cursor:
+            def task_func(entry=val):
+                ops_set = {}
+                ops_unset = {}
+
+                for key in ['isDone', 'images']:
+                    if key in entry:
+                        ops_set[key] = entry[key]
+                    else:
+                        ops_unset[key] = 1
+
+                ops = {}
+                if ops_set:
+                    ops['$set'] = ops_set
+                if ops_unset:
+                    ops['$unset'] = ops_unset
+
+                if ops:
+                    dst_col.update({'_id': entry['_id']}, ops)
+
+            self.add_task(task_func)
+
+    def populate_tasks(self):
+        self.sync_images()
