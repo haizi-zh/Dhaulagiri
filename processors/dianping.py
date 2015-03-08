@@ -38,7 +38,7 @@ class FactoryBuilder(object):
             raise ValueError('Invalid factory name: %s' % factory_name)
 
 
-class DianpingProcessor(BaseProcessor):
+class DianpingFetcher(BaseProcessor):
     """
     处理大众点评的数据
 
@@ -98,3 +98,169 @@ class DianpingProcessor(BaseProcessor):
                     yield fetch_shop_details
 
             self.add_task(task)
+
+
+class DianpingProcessor(BaseProcessor):
+    name = 'dianping-shop'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.build_args()
+
+        # 缓存的城市信息
+        from gevent.lock import BoundedSemaphore
+
+        self._city_cache = {}
+        self._city_cache_lock = BoundedSemaphore(1)
+
+    def build_args(self):
+        """
+        处理命令行参数
+        """
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--limit', type=int)
+        parser.add_argument('--skip', type=int, default=0)
+        self.args, leftover = parser.parse_known_args()
+
+    def build_cursor(self):
+        col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
+        cursor = col.find({}).skip(self.args.skip)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        return cursor
+
+    def populate_tasks(self):
+        for val in self.build_cursor():
+            def task(entry=val):
+                self.process_details(entry)
+
+            self.add_task(task)
+
+    def get_city(self, city_name, coords):
+        """
+        通过城市名称和坐标，获得城市详情
+        """
+        if city_name not in self._city_cache:
+            try:
+                self._city_cache_lock.acquire()
+                if city_name not in self._city_cache:
+                    col = get_mongodb('geo', 'Locality', 'mongo')
+                    lat = coords['lat']
+                    lng = coords['lng']
+                    geo_json = {'type': 'Point', 'coordinates': [coords['lng'], coords['lat']]}
+                    max_distance = 200000
+                    city_list = list(col.find(
+                        {'alias': city_name,
+                         'location': {'$near': {'$geometry': geo_json, '$maxDistance': max_distance}}}))
+                    if city_list:
+                        city = city_list[0]
+                        self._city_cache[city_name] = city
+                    else:
+                        self.log('Failed to find city: %s, lat=%f, lng=%f' % (city_name, lat, lng), logging.WARN)
+                        self._city_cache[city_name] = None
+            finally:
+                self._city_cache_lock.release()
+
+        return self._city_cache[city_name]
+
+    @staticmethod
+    def calc_rating(entry):
+        """
+        计算店铺的rating
+        """
+        if 'reivew_stat' not in entry:
+            return
+
+        review = entry['reivew_stat']
+        tmp = 0
+        for idx in xrange(1, 6):
+            key = 'reviewCountStar%d' % idx
+            tmp += idx * review[key]
+        total_cnt = review['reviewCountAllStar']
+        if total_cnt == 0:
+            return
+        rating = float(tmp) / total_cnt
+
+        return {'rating': rating, 'voteCnt': total_cnt}
+
+    def process_details(self, entry):
+        """
+        处理店铺详情
+        """
+        city_info = self.get_city(entry['city_name'], {'lat': entry['lat'], 'lng': entry['lng']})
+        if not city_info:
+            return
+
+        country = {}
+        for key in ('_id', 'zhName', 'enName'):
+            if key in city_info['country']:
+                country[key] = city_info['country'][key]
+
+        locality = {}
+        for key in ('_id', 'zhName', 'enName', 'location'):
+            if key in city_info:
+                locality[key] = city_info[key]
+
+        shop = {'source': {'dianping': {'id': entry['shop_id']}},
+                'zhName': entry['title'], 'alias': [entry['title']],
+                'address': entry['addr'],
+                'location': {'type': 'Point', 'coordinates': [entry['lng'], entry['lat']]},
+                'country': country, 'locality': locality, 'targets': [country['_id'], locality['_id']],
+                'taoziEna': True, 'lxpEna': True}
+
+        tags = []
+        if 'tags' in entry and entry['tags']:
+            for t in entry['tags']:
+                tags.append(t)
+        if 'cat_name' in entry and entry['cat_name']:
+            cat_name = entry['cat_name']
+            tags.append(cat_name)
+            entry['style'] = cat_name
+        tags = list(set(tags))
+        if tags:
+            shop['tags'] = tags
+
+        fields_map = {'mean_price': 'price', 'tel': 'tel', 'open_time': 'openTime', 'cover_image': 'cover_image'}
+        for key1, key2 in fields_map.items():
+            if key1 in entry and entry[key1]:
+                shop[key2] = entry[key1]
+
+        score = self.calc_rating(entry)
+        if score:
+            shop['voteCnt'] = score['voteCnt']
+            shop['rating'] = score['rating']
+
+        self.update_shop(shop)
+
+    @staticmethod
+    def add_image(image_url):
+        from hashlib import md5
+
+        url_hash = md5(image_url).hexdigest()
+        image = {'url_hash': url_hash, 'key': url_hash, 'url': image_url}
+        col = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        col.update({'key': image['key']}, {'$set': image}, upsert=True)
+
+
+    @staticmethod
+    def update_shop(shop):
+        """
+        将店铺存储至数据库
+        """
+        if 'cover_image' in shop:
+            cover = shop.pop('cover_image')
+            DianpingProcessor.add_image(cover)
+
+        add_to_set = {}
+        for key in ('tags', 'alias'):
+            if key in shop:
+                value_list = shop.pop(key)
+                add_to_set[key] = {'$each': value_list}
+        ops = {'$set': shop}
+        if add_to_set:
+            ops['$addToSet'] = add_to_set
+
+        col = get_mongodb('raw_dianping', 'DiningProc', 'mongo-raw')
+        col.update({'source.dianping.id': shop['source']['dianping']['id']}, ops, upsert=True)
