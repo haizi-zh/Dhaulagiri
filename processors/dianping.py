@@ -121,30 +121,81 @@ class DianpingMatcher(BaseProcessor):
 
     def build_cursor(self):
         col = get_mongodb('poi', 'Restaurant', 'mongo')
-        cursor = col.find({'source.dianping.id': None, 'locality._id':{'$in':self.city_map.keys()}},
+        cursor = col.find({'source.dianping.id': None, 'locality._id': {'$in': self.city_map.keys()}},
                           {'locality': 1, 'zhName': 1, 'alias': 1, 'location': 1}).skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
         return cursor
 
+    @staticmethod
+    def get_shop_by_id(shop_id):
+        col = get_mongodb('raw_dianping', 'DiningProc', 'mongo-raw')
+        return col.find_one({'source.dianping.id': shop_id})
+
     def parse_search_list(self, response):
-        pass
+        """
+        解析搜索结果列表，返回第一条数据
+        """
+        from lxml import etree
+
+        tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
+        shop_list = tree_node.xpath('//div[contains(@class,"shop-list")]/ul/li//a[@href and @onclick and @title]/@href')
+
+        shop_id = None
+        if shop_list:
+            match = re.search(r'shop/(\d+)', shop_list[0])
+            if match:
+                shop_id = int(match.group(1))
+
+        if not shop_id:
+            return
+        return self.get_shop_by_id(shop_id)
+
+    @staticmethod
+    def default_validator(response):
+        """
+        默认的response验证器，通过判断HTTP status code来确定代理是否有效
+
+        :param response:
+        :return:
+        """
+        return response.status_code in [200, 301, 302, 304, 404]
 
     def dianping_match(self, entry):
         """
         进行match操作
         """
-        city_id = self.city_map[entry['locality']['_id']]
+        city_info = self.city_map[entry['locality']['_id']]
+        city_id = city_info['city_id']
         shop_name = entry['zhName']
-        location = entry['location']['coordinates']
-        coords = {'lng': location[0], 'lat': location['1']}
 
-        url = 'http://www.dianping.com/search/keyword/%d/0_%s'%(city_id, shop_name)
-        response = self.request.get(url)
+        url = 'http://www.dianping.com/search/keyword/%d/0_%s' % (city_id, shop_name)
+        response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.default_validator}})
+        if response.status_code == 404:
+            return
+        shop = self.parse_search_list(response)
+        if not shop:
+            self.log('Failed to find shop %s in %s' % (shop_name, city_info['city_name']), logging.WARN)
+            return
 
+        # 检查经纬度是否一致
+        try:
+            coords1 = entry['location']['coordinates']
+            coords2 = shop['location']['coordinates']
+        except KeyError:
+            return
 
+        from utils import haversine
 
-        pass
+        # 最多允许1km的误差
+        max_distance = 1
+        if haversine(coords1[0], coords1[1], coords2[0], coords2[1]) < max_distance:
+            self.set_shop_id(entry, shop['source']['dianping']['id'])
+
+    @staticmethod
+    def set_shop_id(shop, dianping_id):
+        col = get_mongodb('poi', 'Restaurant', 'mongo')
+        col.update({'_id': shop['_id']}, {'$set': {'source.dianping': {'id': dianping_id}}})
 
     def populate_tasks(self):
         for val in self.build_cursor():
