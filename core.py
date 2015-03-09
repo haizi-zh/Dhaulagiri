@@ -188,6 +188,11 @@ class ProcessorEngine(LoggerMixin):
 
     __instance = None
 
+    def _get_redis(self):
+        return self._redis
+
+    redis = property(_get_redis)
+
     @classmethod
     def get_instance(cls):
         if not cls.__instance:
@@ -280,6 +285,8 @@ class ProcessorEngine(LoggerMixin):
         args, leftover = parser.parse_known_args()
         self.arg_parser = parser
 
+        self._redis = self._init_redis()
+
         # 获得TaskTracker
         self.task_tracker = self.parse_tracking(args)
 
@@ -290,6 +297,18 @@ class ProcessorEngine(LoggerMixin):
         self.processors = {}
 
         self.log('Engine init completed')
+
+    @staticmethod
+    def _init_redis():
+        import redis
+        from utils import load_yaml
+
+        cfg = load_yaml()
+        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+        host = redis_conf['host']
+        port = int(redis_conf['port'])
+
+        return redis.StrictRedis(host=host, port=port, db=0)
 
     def add_processor(self, name):
         if name not in self.processor_store:
