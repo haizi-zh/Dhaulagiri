@@ -99,7 +99,7 @@ class DianpingMatcher(BaseProcessor):
         col_loc = get_mongodb('geo', 'Locality', 'mongo')
         for city_item in col_dp.find({}):
             city_name = city_item['city_name']
-            redis_key = 'dianping/norm_city_%s' % city_name
+            redis_key = 'dianping:norm_city_%s' % city_name
             norm_city_info = None
 
             if refresh_redis or not redis.exists(redis_key):
@@ -131,39 +131,271 @@ class DianpingMatcher(BaseProcessor):
         parser = argparse.ArgumentParser()
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', type=int, default=0)
+        parser.add_argument('--query', type=str)
         self.args, leftover = parser.parse_known_args()
 
     def build_cursor(self):
         col = get_mongodb('poi', 'Restaurant', 'mongo')
-        cursor = col.find({'source.dianping.id': None, 'locality._id': {'$in': self.city_map.keys()}},
-                          {'locality': 1, 'zhName': 1, 'alias': 1, 'location': 1}).skip(self.args.skip)
+        query = {'source.dianping.id': None, 'locality._id': {'$in': self.city_map.keys()}}
+        if self.args.query:
+            exec 'from bson import ObjectId'
+            extra_query = eval(self.args.query)
+        else:
+            extra_query = {}
+        if extra_query:
+            query = {'$and': [query, extra_query]}
+
+        cursor = col.find(query, {'locality': 1, 'zhName': 1, 'alias': 1, 'location': 1}).skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
         return cursor
 
     @staticmethod
     def get_shop_by_id(shop_id):
-        col = get_mongodb('raw_dianping', 'DiningProc', 'mongo-raw')
-        return col.find_one({'source.dianping.id': shop_id})
+        col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
+        return col.find_one({'shop_id': shop_id}, {'lat': 1, 'lng': 1})
 
-    def parse_search_list(self, response):
+    def parse_shop_page(self, response, context):
         """
-        解析搜索结果列表，返回第一条数据
+        解析单个搜索结果页
+        :return 店铺详情的集合
         """
         from lxml import etree
 
         tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
-        shop_list = tree_node.xpath('//div[contains(@class,"shop-list")]/ul/li//a[@href and @onclick and @title]/@href')
-
-        shop_id = None
-        if shop_list:
-            match = re.search(r'shop/(\d+)', shop_list[0])
-            if match:
+        col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
+        for shop_href in tree_node.xpath('//div[contains(@class,"shop-list")]/ul/li'
+                                         '//a[@href and @onclick and @title]/@href'):
+            match = re.search(r'shop/(\d+)', shop_href)
+            if not match:
+                continue
+            try:
                 shop_id = int(match.group(1))
+            except ValueError:
+                continue
+            context['shop_id'] = shop_id
 
-        if not shop_id:
+            shop = col.find_one({'shop_id': shop_id})
+            if shop:
+                yield shop
+            else:
+                redis_key = 'dianping:shop_html_%d' % shop_id
+                html_body = self.engine.redis.get(redis_key)
+                if not html_body:
+                    try:
+                        html_body = self.request.get('http://www.dianping.com/shop/%d' % shop_id).text
+                    except IOError:
+                        continue
+
+                shop_details = self.parse_shop_details(html_body, context)
+                if shop_details:
+                    self.engine.redis.set(redis_key, html_body)
+                    yield shop_details
+
+    @staticmethod
+    def get_dishes(html):
+        """
+        获得推荐菜品
+        """
+        from lxml import etree
+
+        dishes = []
+        sel = etree.fromstring(html, parser=etree.HTMLParser())
+        for tmp in sel.xpath('//div[contains(@class,"shop-tab-recommend")]/p[@class="recommend-name"]'
+                             '/a[@class="item" and @title]'):
+            dish_name = tmp.xpath('./@title')[0].strip()
+            # 去除首尾可能出现的句点
+            dish_name = re.sub(r'\s*\.$', '', dish_name)
+            dish_name = re.sub(r'^\.\s*', '', dish_name)
+            recommend_cnt = 0
+
+            tmp = tmp.xpath('./em[@class="count"]/text()')
+            if tmp:
+                match = re.search(r'\d+', tmp[0])
+                if match:
+                    recommend_cnt = int(match.group())
+            dishes.append({'name': dish_name, 'recommend_cnt': recommend_cnt})
+
+        return dishes
+
+    def parse_shop_details(self, html_body, context):
+        """
+        解析店铺详情
+        :return: 单个店铺详情
+        """
+        from lxml import etree
+
+        tree_node = etree.fromstring(html_body, parser=etree.HTMLParser())
+
+        # 保证这是一个餐厅页面
+        tmp = tree_node.xpath('//div[@class="breadcrumb"]/a[@href]/text()')
+        if not tmp or u'餐厅' not in tmp[0]:
             return
-        return self.get_shop_by_id(shop_id)
+
+        basic_info_node = tree_node.xpath('//div[@id="basic-info"]')[0]
+        shop_id = context['shop_id']
+
+        taste_rating = None
+        env_rating = None
+        service_rating = None
+        mean_price = None
+
+        def extract_rating(text):
+            match2 = re.search(r'\d+\.\d+', text)
+            if match2:
+                return float(match2.group())
+            else:
+                return None
+
+        for info_text in basic_info_node.xpath('.//div[@class="brief-info"]/span[@class="item"]/text()'):
+            if info_text.startswith(u'口味'):
+                taste_rating = extract_rating(info_text)
+            elif info_text.startswith(u'环境'):
+                env_rating = extract_rating(info_text)
+            elif info_text.startswith(u'服务'):
+                service_rating = extract_rating(info_text)
+            elif info_text.startswith(u'人均'):
+                match = re.search(r'\d+', info_text)
+                if match:
+                    mean_price = int(match.group())
+
+        tel = None
+        tmp = basic_info_node.xpath('.//p[contains(@class,"expand-info") and contains(@class,"tel")]'
+                                    '/span[@itemprop="tel"]/text()')
+        if tmp and tmp[0].strip():
+            tel = tmp[0].strip()
+
+        addr = None
+        tmp = basic_info_node.xpath('.//div[contains(@class,"expand-info") and contains(@class,"address")]'
+                                    '/span[@itemprop="street-address"]/text()')
+        if tmp and tmp[0].strip():
+            addr = tmp[0].strip()
+
+        cover = None
+        tmp = tree_node.xpath('//div[@id="aside"]//div[@class="photos"]/a[@href]/img[@itemprop="photo" and @src]/@src')
+        if tmp:
+            cover = tmp[0].strip()
+
+        open_time = None
+        tags = set([])
+        desc = None
+        for other_info_node in basic_info_node.xpath('.//div[contains(@class,"other")]/p[contains(@class,"info")]'):
+            tmp = other_info_node.xpath('./span[@class="info-name"]/text()')
+            if not tmp:
+                continue
+            info_name = tmp[0]
+            if info_name.startswith(u'营业时间'):
+                tmp = other_info_node.xpath('./span[@class="item"]/text()')
+                if not tmp:
+                    continue
+                open_time = tmp[0].strip()
+            elif info_name.startswith(u'分类标签'):
+                tmp = other_info_node.xpath('./span[@class="item"]/a/text()')
+                for tag in tmp:
+                    tags.add(tag.strip())
+            elif info_name.startswith(u'餐厅简介'):
+                tmp = '\n'.join(filter(lambda v: v,
+                                       (tmp.strip() for tmp in other_info_node.xpath('./text()')))).strip()
+                if not tmp:
+                    continue
+                desc = tmp
+
+        tmp = tree_node.xpath('//div[@id="shop-tabs"]/script/text()')
+        if tmp:
+            dishes = self.get_dishes(tmp[0])
+        else:
+            dishes = []
+
+        lat = None
+        lng = None
+        match = re.search(r'lng:(\d+\.\d+),lat:(\d+\.\d+)', html_body)
+        if match:
+            lng = float(match.group(1))
+            lat = float(match.group(2))
+
+        # addr title mean_price cover_image
+
+        tmp = tree_node.xpath('//div[@id="basic-info"]/h1[@class="shop-name"]/text()')
+        title = None
+        if tmp:
+            title = tmp[0].strip()
+        if not title:
+            return
+
+        city_info = context['city_info']
+        m = {'city_id': city_info['city_id'], 'city_name': city_info['city_name'],
+             'city_pinyin': city_info['city_pinyin'],
+             'shop_id': shop_id,
+             'taste_rating': taste_rating,
+             'env_rating': env_rating,
+             'service_rating': service_rating,
+             'tel': tel, 'open_time': open_time, 'desc': desc, 'dishes': dishes,
+             'tags': list(tags) if tags else None,
+             'lat': lat, 'lng': lng,
+             'title': title, 'addr': addr, 'cover_image': cover, 'mean_price': mean_price,
+             'review_stat': self.parse_review_stat(shop_id)}
+        return m
+
+    def parse_review_stat(self, shop_id):
+        """
+        解析评论统计
+        """
+        template = 'http://www.dianping.com/ajax/json/shop/wizard/getReviewListFPAjax?' \
+                   'act=getreviewfilters&shopId=%d&tab=all'
+        review_url = template % shop_id
+
+        redis_key = 'dianping:shop_review_%d' % shop_id
+        response_body = self.engine.redis.get(redis_key)
+        try:
+            if not response_body:
+                response = self.request.get(url=review_url)
+                data = json.loads(response.text)
+                self.engine.redis.set(redis_key, response.text)
+                return data['msg']
+            else:
+                data = json.loads(response_body)
+                return data['msg']
+        except ValueError:
+            return
+
+
+    @staticmethod
+    def json_validator(response):
+        try:
+            data = json.loads(response.text)
+            return data['code'] == 200 and 'msg' in data
+        except (ValueError, KeyError):
+            return False
+
+    def parse_search_list(self, response, context):
+        """
+        解析搜索结果列表，返回shop details
+        """
+        from lxml import etree
+
+        tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
+
+        # pagination
+        pages = []
+        for page_text in tree_node.xpath('//div[@class="page"]/a[@href and @data-ga-page]/@data-ga-page'):
+            try:
+                pages.append(int(page_text))
+            except ValueError:
+                continue
+        if pages:
+            max_page = max(pages)
+        else:
+            max_page = 0
+
+        for shop in self.parse_shop_page(response, context):
+            yield shop
+
+        for page_idx in xrange(2, max_page + 1):
+            page_url = response.url + '/p%d' % page_idx
+            page_response = self.request.get(page_url)
+
+            for shop in self.parse_shop_page(page_response, context):
+                yield shop
 
     @staticmethod
     def default_validator(response):
@@ -175,6 +407,17 @@ class DianpingMatcher(BaseProcessor):
         """
         return response.status_code in [200, 301, 302, 304, 404]
 
+    @staticmethod
+    def store_shops(shop_list):
+        """
+        将shop保存到raw_dianping数据库
+        """
+        col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
+        for shop in shop_list:
+            ret = col.find_one({'shop_id': shop['shop_id']}, {'_id': 1})
+            if not ret:
+                col.update({'shop_id': shop['shop_id']}, {'$set': shop}, upsert=True)
+
     def dianping_match(self, entry):
         """
         进行match操作
@@ -183,19 +426,24 @@ class DianpingMatcher(BaseProcessor):
         city_id = city_info['city_id']
         shop_name = entry['zhName']
 
+        context = {'city_info': city_info, 'shop_name': shop_name}
+
         url = 'http://www.dianping.com/search/keyword/%d/0_%s' % (city_id, shop_name)
-        response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.default_validator}})
-        if response.status_code == 404:
-            return
-        shop = self.parse_search_list(response)
-        if not shop:
-            self.log('Failed to find shop %s in %s' % (shop_name, city_info['city_name']), logging.WARN)
+        search_response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.default_validator}})
+        if search_response.status_code == 404:
             return
 
+        shop_list = list(self.parse_search_list(search_response, context))
+        if not shop_list:
+            return
+
+        self.store_shops(shop_list)
+
+        the_shop = shop_list[0]
         # 检查经纬度是否一致
         try:
             coords1 = entry['location']['coordinates']
-            coords2 = shop['location']['coordinates']
+            coords2 = [the_shop['lng'], the_shop['lat']]
         except KeyError:
             return
 
@@ -204,10 +452,10 @@ class DianpingMatcher(BaseProcessor):
         # 最多允许1km的误差
         max_distance = 1
         if haversine(coords1[0], coords1[1], coords2[0], coords2[1]) < max_distance:
-            self.set_shop_id(entry, shop['source']['dianping']['id'])
+            self.bind_shop_id(entry, the_shop['shop_id'])
 
     @staticmethod
-    def set_shop_id(shop, dianping_id):
+    def bind_shop_id(shop, dianping_id):
         col = get_mongodb('poi', 'Restaurant', 'mongo')
         col.update({'_id': shop['_id']}, {'$set': {'source.dianping': {'id': dianping_id}}})
 
@@ -303,6 +551,7 @@ class DianpingProcessor(BaseProcessor):
         parser = argparse.ArgumentParser()
         parser.add_argument('--limit', type=int)
         parser.add_argument('--skip', type=int, default=0)
+        parser.add_argument('--query', type=str)
         self.args, leftover = parser.parse_known_args()
 
     def build_cursor(self):
