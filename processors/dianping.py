@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import logging
 import re
 from lxml import etree
@@ -87,23 +88,36 @@ class DianpingMatcher(BaseProcessor):
         self.city_map = {}
         self.build_city_map()
 
-    def build_city_map(self):
+    def build_city_map(self, refresh_redis=False):
         """
         建立从自有数据库的city到大众点评的city的映射
         """
+        redis = self.engine.redis
         city_map = {}
 
         col_dp = get_mongodb('raw_dianping', 'City', 'mongo-raw')
         col_loc = get_mongodb('geo', 'Locality', 'mongo')
         for city_item in col_dp.find({}):
             city_name = city_item['city_name']
-            candidates = list(col_loc.find({'alias': city_name}, {'_id': 1}))
-            if len(candidates) > 1:
-                self.log('Duplicate cities found for %s' % city_name, logging.WARN)
-            elif not candidates:
-                self.log('No city found for %s' % city_name, logging.WARN)
+            redis_key = 'dianping/norm_city_%s' % city_name
+            norm_city_info = None
+
+            if refresh_redis or not redis.exists(redis_key):
+                candidates = list(col_loc.find({'alias': city_name}, {'_id': 1}))
+                if len(candidates) > 1:
+                    self.log('Duplicate cities found for %s' % city_name, logging.WARN)
+                elif not candidates:
+                    self.log('No city found for %s' % city_name, logging.WARN)
+                else:
+                    norm_city_info = candidates[0]
+
+                redis.set(redis_key, norm_city_info)
             else:
-                city_id = candidates[0]['_id']
+                exec 'from bson import ObjectId'
+                norm_city_info = eval(redis.get(redis_key))
+
+            if norm_city_info:
+                city_id = norm_city_info['_id']
                 city_map[city_id] = city_item
 
         self.city_map = city_map
