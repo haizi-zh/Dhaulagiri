@@ -477,68 +477,6 @@ class DianpingMatcher(BaseProcessor):
             self.add_task(task)
 
 
-class DianpingFetcher(BaseProcessor):
-    """
-    处理大众点评的数据
-
-    通过指定一个populator来获得入口数据。然后，调用大众点评的网站接口，获得更多的信息
-    """
-
-    name = 'dianping'
-
-    def __init__(self, *args, **kwargs):
-        BaseProcessor.__init__(self, *args, **kwargs)
-
-    @staticmethod
-    def find_city(city_name):
-        """
-        根据城市名称，在大众点评的城市列表中进行搜索
-        """
-        col = get_mongodb('raw_dianping', 'City', 'mongo-raw')
-        ret = col.find_one({'city_name': city_name}, {'city_id': 1})
-        if ret:
-            return ret['city_id']
-        else:
-            return None
-
-    def parse_shop_details(self, response):
-        """
-        解析店面的详情
-        """
-        pass
-
-    def populate_tasks(self):
-        col = get_mongodb('raw_faq', 'CtripAnswer', 'mongo-raw')
-        populator = FactoryBuilder().get_factory('qunar')
-        cursor = populator.generator()
-
-        for val in cursor:
-            def task(entry=val):
-                city_id = self.find_city(entry['locality'])
-                if not city_id:
-                    return
-                url = 'http://www.dianping.com/search/keyword/%d/0_%s/p1' % (city_id, entry['name'])
-                response = self.request.get(url)
-
-                tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
-                for shop_href in tree_node.xpath('//div[contains(@class,"shop-list")]/ul/li'
-                                                 '//a[@onclick and @title and @href]/@href'):
-                    match = re.search(r'shop/(\d+)', shop_href)
-                    if not match:
-                        continue
-                    shop_id = int(match.group(1))
-
-                    def fetch_shop_details(val=shop_id):
-                        shop_url = 'http://www.dianping.com/shop/%d' % val
-                        self.log('Processing %s' % shop_url, logging.DEBUG)
-                        shop_resposne = self.request.get(shop_url)
-                        self.parse_shop_details(shop_resposne)
-
-                    yield fetch_shop_details
-
-            self.add_task(task)
-
-
 class DianpingProcessor(BaseProcessor):
     name = 'dianping-shop'
 
@@ -566,7 +504,13 @@ class DianpingProcessor(BaseProcessor):
 
     def build_cursor(self):
         col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
-        cursor = col.find({}).skip(self.args.skip)
+
+        query = {}
+        if self.args.query:
+            exec 'from bson import ObjectId'
+            query = eval(self.args.query)
+
+        cursor = col.find(query).skip(self.args.skip)
         if self.args.limit:
             cursor.limit(self.args.limit)
         return cursor
@@ -589,6 +533,8 @@ class DianpingProcessor(BaseProcessor):
                     col = get_mongodb('geo', 'Locality', 'mongo')
                     lat = coords['lat']
                     lng = coords['lng']
+                    if not isinstance(lat, float) or not isinstance(lng, float):
+                        return
                     geo_json = {'type': 'Point', 'coordinates': [coords['lng'], coords['lat']]}
                     max_distance = 200000
                     city_list = list(col.find(
@@ -680,9 +626,11 @@ class DianpingProcessor(BaseProcessor):
 
         url_hash = md5(image_url).hexdigest()
         image = {'url_hash': url_hash, 'key': url_hash, 'url': image_url}
-        col = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
-        col.update({'key': image['key']}, {'$set': image}, upsert=True)
-
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+        if not col_im.find_one({'key': image['key']}, {'_id':1}):
+            col = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+            col.update({'key': image['key']}, {'$set': image}, upsert=True)
+        return image['key']
 
     @staticmethod
     def update_shop(shop):
@@ -691,7 +639,8 @@ class DianpingProcessor(BaseProcessor):
         """
         if 'cover_image' in shop:
             cover = shop.pop('cover_image')
-            DianpingProcessor.add_image(cover)
+            image_key = DianpingProcessor.add_image(cover)
+            shop['images'] = [{'key': image_key}]
 
         add_to_set = {}
         for key in ('tags', 'alias'):
