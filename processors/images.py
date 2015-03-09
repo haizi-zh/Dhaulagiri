@@ -240,11 +240,15 @@ class ImageUploader(BaseProcessor):
             self.on_failure(entry)
             return
 
-    def populate_tasks(self):
+    def build_cursor(self):
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
         query = {'failCnt': {'$not': {'$gte': 5}}}
 
-        extra_query = eval(self.args.query) if self.args.query else {}
+        if self.args.query:
+            exec 'from bson import ObjectId'
+            extra_query = eval(self.args.query)
+        else:
+            extra_query = {}
         if extra_query:
             query = {'$and': [query, extra_query]}
 
@@ -252,6 +256,11 @@ class ImageUploader(BaseProcessor):
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
+
+        return cursor
+
+    def populate_tasks(self):
+        cursor = self.build_cursor()
 
         for val in cursor:
 
