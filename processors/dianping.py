@@ -192,6 +192,9 @@ class DianpingMatcher(BaseProcessor):
                     self.engine.redis.set(redis_key, html_body)
                     yield shop_details
 
+                    # TODO 暂时只返回一个店铺
+                    return
+
     @staticmethod
     def get_dishes(html):
         """
@@ -223,6 +226,9 @@ class DianpingMatcher(BaseProcessor):
         解析店铺详情
         :return: 单个店铺详情
         """
+        shop_id = context['shop_id']
+        self.log('Fetching shop: %d' % shop_id, logging.INFO)
+
         from lxml import etree
 
         tree_node = etree.fromstring(html_body, parser=etree.HTMLParser())
@@ -233,7 +239,6 @@ class DianpingMatcher(BaseProcessor):
             return
 
         basic_info_node = tree_node.xpath('//div[@id="basic-info"]')[0]
-        shop_id = context['shop_id']
 
         taste_rating = None
         env_rating = None
@@ -390,6 +395,8 @@ class DianpingMatcher(BaseProcessor):
         for shop in self.parse_shop_page(response, context):
             yield shop
 
+        # TODO 暂时取消分页
+        max_page = 0
         for page_idx in xrange(2, max_page + 1):
             page_url = response.url + '/p%d' % page_idx
             page_response = self.request.get(page_url)
@@ -451,8 +458,11 @@ class DianpingMatcher(BaseProcessor):
 
         # 最多允许1km的误差
         max_distance = 1
-        if haversine(coords1[0], coords1[1], coords2[0], coords2[1]) < max_distance:
-            self.bind_shop_id(entry, the_shop['shop_id'])
+        try:
+            if haversine(coords1[0], coords1[1], coords2[0], coords2[1]) < max_distance:
+                self.bind_shop_id(entry, the_shop['shop_id'])
+        except TypeError:
+            self.log('Unable to locate shop: %d' % the_shop['shop_id'], logging.WARN)
 
     @staticmethod
     def bind_shop_id(shop, dianping_id):
