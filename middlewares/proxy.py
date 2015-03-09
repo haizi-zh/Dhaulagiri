@@ -16,7 +16,7 @@ class ProxyMiddleware(DownloadMiddleware):
         通过API接口，更新可用代理列表
         """
 
-        response = self._manager.engine.request.get('http://api.taozilvxing.cn/core/misc/proxies?'
+        response = self._manager.engine.request.get('http://api2.taozilvxing.cn/core/misc/proxies?'
                                                     'verifier=all&latency=2&pageSize=500&recently=24', proxies={})
 
         def func(entry):
