@@ -10,6 +10,40 @@ from utils.database import get_mongodb
 __author__ = 'zephyre'
 
 
+class DianpingHelper(object):
+    def __init__(self):
+        # 缓存的城市信息
+        from gevent.lock import BoundedSemaphore
+
+        self._city_cache = {}
+        self._city_cache_lock = BoundedSemaphore(1)
+
+    def get_city(self, city_name, coords):
+        """
+        通过城市名称和坐标，获得城市详情
+        """
+        if city_name not in self._city_cache:
+            try:
+                self._city_cache_lock.acquire()
+                if city_name not in self._city_cache:
+                    col = get_mongodb('geo', 'Locality', 'mongo')
+                    lat = coords['lat']
+                    lng = coords['lng']
+                    geo_json = {'type': 'Point', 'coordinates': [coords['lng'], coords['lat']]}
+                    max_distance = 200000
+                    city_list = list(col.find(
+                        {'alias': city_name,
+                         'location': {'$near': {'$geometry': geo_json, '$maxDistance': max_distance}}}))
+                    if city_list:
+                        city = city_list[0]
+                        self._city_cache[city_name] = city
+                    else:
+                        self._city_cache[city_name] = None
+                        raise ValueError('Failed to find city: %s, lat=%f, lng=%f' % (city_name, lat, lng))
+            finally:
+                self._city_cache_lock.release()
+
+
 class BaseFactory(object):
     def generator(self):
         raise NotImplementedError
@@ -36,6 +70,88 @@ class FactoryBuilder(object):
             return QunarFactory()
         else:
             raise ValueError('Invalid factory name: %s' % factory_name)
+
+
+class DianpingMatcher(BaseProcessor):
+    """
+    和大众点评的数据进行关联
+    """
+
+    name = 'dianping-matcher'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+
+        self.build_args()
+
+        self.city_map = {}
+        self.build_city_map()
+
+    def build_city_map(self):
+        """
+        建立从自有数据库的city到大众点评的city的映射
+        """
+        city_map = {}
+
+        col_dp = get_mongodb('raw_dianping', 'City', 'mongo-raw')
+        col_loc = get_mongodb('geo', 'Locality', 'mongo')
+        for city_item in col_dp.find({}):
+            city_name = city_item['city_name']
+            candidates = list(col_loc.find({'alias': city_name}, {'_id': 1}))
+            if len(candidates) > 1:
+                self.log('Duplicate cities found for %s' % city_name, logging.WARN)
+            elif not candidates:
+                self.log('No city found for %s' % city_name, logging.WARN)
+            else:
+                city_id = candidates[0]['_id']
+                city_map[city_id] = city_item
+
+        self.city_map = city_map
+
+    def build_args(self):
+        """
+        处理命令行参数
+        """
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--limit', type=int)
+        parser.add_argument('--skip', type=int, default=0)
+        self.args, leftover = parser.parse_known_args()
+
+    def build_cursor(self):
+        col = get_mongodb('poi', 'Restaurant', 'mongo')
+        cursor = col.find({'source.dianping.id': None, 'locality._id':{'$in':self.city_map.keys()}},
+                          {'locality': 1, 'zhName': 1, 'alias': 1, 'location': 1}).skip(self.args.skip)
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        return cursor
+
+    def parse_search_list(self, response):
+        pass
+
+    def dianping_match(self, entry):
+        """
+        进行match操作
+        """
+        city_id = self.city_map[entry['locality']['_id']]
+        shop_name = entry['zhName']
+        location = entry['location']['coordinates']
+        coords = {'lng': location[0], 'lat': location['1']}
+
+        url = 'http://www.dianping.com/search/keyword/%d/0_%s'%(city_id, shop_name)
+        response = self.request.get(url)
+
+
+
+        pass
+
+    def populate_tasks(self):
+        for val in self.build_cursor():
+            def task(entry=val):
+                self.dianping_match(entry)
+
+            self.add_task(task)
 
 
 class DianpingFetcher(BaseProcessor):
