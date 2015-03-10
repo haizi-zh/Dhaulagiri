@@ -108,6 +108,7 @@ class QunarPoiProcessor(BaseProcessor):
         cursor.execute('SELECT COUNT(*) AS cnt FROM qunar_%s WHERE hotScore<%d' % (
             'meishi' if poi_type == 'dining' else 'gouwu', entry['hotScore']))
         data['hotness'] = float(cursor.fetchone()['cnt']) / self.denom
+        # TODO rating和hotness不能一样
         data['rating'] = data['hotness']
 
         col_im = get_mongodb('raw_qunar', 'Image', profile='mongo-raw')

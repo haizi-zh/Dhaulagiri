@@ -188,6 +188,11 @@ class ProcessorEngine(LoggerMixin):
 
     __instance = None
 
+    def _get_redis(self):
+        return self._redis
+
+    redis = property(_get_redis)
+
     @classmethod
     def get_instance(cls):
         if not cls.__instance:
@@ -280,6 +285,8 @@ class ProcessorEngine(LoggerMixin):
         args, leftover = parser.parse_known_args()
         self.arg_parser = parser
 
+        self._redis = self._init_redis()
+
         # 获得TaskTracker
         self.task_tracker = self.parse_tracking(args)
 
@@ -290,6 +297,18 @@ class ProcessorEngine(LoggerMixin):
         self.processors = {}
 
         self.log('Engine init completed')
+
+    @staticmethod
+    def _init_redis():
+        import redis
+        from utils import load_yaml
+
+        cfg = load_yaml()
+        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+        host = redis_conf['host']
+        port = int(redis_conf['port'])
+
+        return redis.StrictRedis(host=host, port=port, db=0)
 
     def add_processor(self, name):
         if name not in self.processor_store:
@@ -322,6 +341,14 @@ class RequestHelper(object):
     @classmethod
     def from_engine(cls, engine):
         return RequestHelper(engine)
+
+    @staticmethod
+    def get_default_header():
+        return {'User-Agent':
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_2) AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/40.0.2214.115 Safari/537.36',
+                'Accept-Encoding': 'gzip, deflate, sdch',
+                'Accept-Language': 'en,zh-CN;q=0.8,zh;q=0.6,zh-TW;q=0.4,en-US;q=0.2'}
 
     def request(self, method, url, params=None, data=None, headers=None, cookies=None, files=None, auth=None,
                 hooks=None, json=None, timeout=None, allow_redirects=True, proxies=None, retry=5, user_data=None):
@@ -360,8 +387,10 @@ class RequestHelper(object):
         for idx in xrange(retry):
             session = Session()
             session_args = {'timeout': timeout, 'allow_redirects': allow_redirects, 'proxies': proxies}
-            
+
             try:
+                if not headers:
+                    headers = self.get_default_header()
                 prepped = Request(method=method, url=url, headers=headers, files=files, data=data, params=params,
                                   auth=auth, cookies=cookies, hooks=hooks).prepare()
                 for entry in mw_list:

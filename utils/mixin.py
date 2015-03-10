@@ -12,7 +12,27 @@ __author__ = 'zephyre'
 
 
 class BaiduSuggestion(object):
+
+    def __init__(self, *args, **kwargs):
+        self.bdurl = 'http://api.map.baidu.com/geoconv/v1/'
+        self.bdak = '7P5mAce1fZubQOahgDTCAWHo'
+
+    def bd_mc_to_ll(self, lat, lng):
+        """
+        百度米制坐标转百度经纬度坐标
+        """
+        mc = 6
+        ll = 5
+        querys = {'ak': self.bdak, 'from': mc, 'to': ll, 'coords': str(lat) + ',' + str(lng)}
+        res = self.request.get(self.bdurl, params=querys).json()
+        latlng = [0, 0]
+        if '0' == str(res['status']):
+            latlngs = res['result'][0]
+            latlng = [float(latlngs['x']), float(latlngs['y'])]
+        return latlng
+
     def get_baidu_sug(self, name, location):
+
         from utils import mercator2wgs
         from urllib import quote
 
@@ -50,8 +70,8 @@ class BaiduSuggestion(object):
 
                 mx = float(tmp[14])
                 my = float(tmp[16])
-                entry['lng'], entry['lat'] = mercator2wgs(mx, my)
-
+                entry['lng'], entry['lat'] = self.bd_mc_to_ll(mx, my)
+                # entry['lng'], entry['lat'] = mercator2wgs(mx, my)
                 result.append(entry)
 
             return result
