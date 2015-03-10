@@ -1,55 +1,104 @@
 # coding=utf-8
+import threading
 from utils import load_yaml
 
 __author__ = 'zephyre'
 
 
-def get_mongodb(db_name, col_name, profile):
+def static_var(var, value):
     """
-    建立MongoDB的连接。
-    :param host:
-    :param port:
-    :param db_name:
-    :param col_name:
+    Decorator to support static variables in functions.
+    """
+    def decorate(func):
+        setattr(func, var, value)
+        return func
+
+    return decorate
+
+
+@static_var('conf', None)
+def load_mongodb_conf():
+    """
+    Load MongoDB configurations
     :return:
     """
+    cached_conf = load_mongodb_conf.conf
 
-    cached = getattr(get_mongodb, 'cached', None)
-    if cached is None:
-        cached = {}
-        setattr(get_mongodb, 'cached', cached)
+    if not cached_conf:
+        conf_all = load_yaml()
+        tmp = conf_all['mongodb'] if 'mongodb' in conf_all else []
+        cached_conf = dict((item['profile'], item) for item in tmp)
+        load_mongodb_conf.conf = cached_conf
 
-    client = cached[profile] if profile in cached else None
+    return cached_conf
+
+
+def init_mongodb_client(conf_item):
+    section = conf_item
+    servers = section.get('servers')
+
+    def build_node_desc(node_conf):
+        return '%s:%s' % (node_conf['host'], node_conf['port'])
+
+    if section.get('replica', False):
+        from pymongo import MongoReplicaSetClient
+        from pymongo import ReadPreference
+
+        client = MongoReplicaSetClient(','.join(map(build_node_desc, servers)), replicaSet=section.get('replName'))
+        pref = section.get('readPref', 'PRIMARY')
+        client.read_preference = getattr(ReadPreference, pref)
+    else:
+        from pymongo import MongoClient
+
+        s = servers[0]
+        client = MongoClient(s['host'], s['port'])
+
+    setattr(client, 'auth_list', set([]))
+
+    return client
+
+
+def auth_mongodb_client(client, auth_info):
+    """
+    MongoDB authentication
+
+    :param auth_info: { 'credb': '', 'user': '', 'passwd': '' }
+    """
+    auth_sig = '%s|%s' % (auth_info['credb'], auth_info['user'])
+    auth_list = client.auth_list
+
+    if auth_sig not in auth_list:
+        db_auth = auth_info['credb']
+        user = auth_info['user']
+        passwd = auth_info['passwd']
+        client[db_auth].authenticate(name=user, password=passwd)
+        auth_list.add(auth_sig)
+
+
+@static_var('cached_clients', {})
+@static_var('lock', threading.Lock())
+def get_mongodb(db_name, col_name, profile):
+    """
+    Establish a MongoDB connection
+    """
+    cached_clients = get_mongodb.cached_clients
+    client = cached_clients[profile] if profile in cached_clients else None
+
+    mongodb_conf = load_mongodb_conf()[profile]
 
     if not client:
-        cfg = load_yaml()
-        section = filter(lambda v: v['profile'] == profile, cfg['mongodb'])[0]
-        servers = section.get('servers')
+        lock = get_mongodb.lock
+        lock.acquire()
+        try:
+            client = cached_clients[profile] if profile in cached_clients else None
+            if not client:
+                client = init_mongodb_client(mongodb_conf)
+                cached_clients[profile] = client
+        finally:
+            lock.release()
 
-        def build_node_desc(node_conf):
-            return '%s:%s' % (node_conf['host'], node_conf['port'])
-
-        if section.get('replica', False):
-            from pymongo import MongoReplicaSetClient
-            from pymongo import ReadPreference
-
-            client = MongoReplicaSetClient(','.join(map(build_node_desc, servers)), replicaSet=section.get('replName'))
-            pref = section.get('readPref', 'PRIMARY')
-            client.read_preference = getattr(ReadPreference, pref)
-        else:
-            from pymongo import MongoClient
-
-            s = servers[0]
-            client = MongoClient(s['host'], s['port'])
-
-        auth = section.get('auth')
-        if auth:
-            db_auth = auth['credb']
-            user = auth['user']
-            passwd = auth['passwd']
-            client[db_auth].authenticate(name=user, password=passwd)
-
-        cached[profile] = client
+    if 'auth' in mongodb_conf and mongodb_conf['auth']:
+        auth_mongodb_client(client, mongodb_conf['auth'])
 
     return client[db_name][col_name]
 
