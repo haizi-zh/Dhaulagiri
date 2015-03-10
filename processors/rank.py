@@ -12,41 +12,27 @@ class PoiRank(BaseProcessor):
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
 
+    def __id_generator(self, collections_array):
+        db_conns = []
+        for coon_name in collections_array:
+            db_conns.append(get_mongodb('poi', coon_name, 'mongo'))
+        for conn in db_conns:
+            for sid in conn.distinct('locality._id'):
+                self.logger.info(sid)
+                yield {'conn': conn, 'id': sid}
+
     def populate_tasks(self):
+        conn_names = ['Shopping', 'Restaurant', 'Hotel']
 
-        # extract ids
-        fin = open('/root/Dhaulagiri/tempfile/online_city_raw.txt', 'r')
-        fout = open('/root/Dhaulagiri/tempfile/online_city_final.txt','a')
-        id_list = []
-        id_kv_name = {}
+        for info in self.__id_generator(conn_names):
+            db_conn = info['conn']
+            sid = info['id']
+            query = {'locality._id': ObjectId(sid)}
+            cursor = list(db_conn.find(query, {"_id": 1}).sort('hotness', pymongo.DESCENDING))
+            for idx, val in enumerate(cursor):
+                def func(entry=val, flag=idx):
+                    self.logger.info('do -- %s' % entry['_id'])
+                    db_conn.update({"_id": entry['_id']}, {'$set': {'rank': flag + 1}})
+                self.add_task(func)
 
-        for line in fin.readlines():
-            temp_id = line[20:44]
-            id_list.append(temp_id)
-            temp_name = line.split(' ')[6].replace('"', '')
-            id_kv_name[temp_id] = temp_name
-            fout.write(('%s %s\n') % (temp_id, temp_name))
-
-        fin.close()
-        fout.close()
-        print id_list
-
-        # Restaurant
-        cols = ["Shopping", "Hotel"]
-        for col in cols:
-            print 'Begin %s' % col
-            for loc_id in id_list:
-                col_poi = get_mongodb('poi', col, 'mongo')
-                query = {'taoziEna': True, 'locality._id': ObjectId(loc_id)}
-                cursor = list(col_poi.find(query, {"_id": 1}).sort('hotness', pymongo.DESCENDING))
-
-                if 0 == len(cursor):
-                    print ('%s %s can\'t be find with "locality._id"') % (loc_id, id_kv_name[loc_id])
-                    continue
-
-                for idx, val in enumerate(cursor):
-                    def func(entry=val, flag=idx):
-                        col_poi.update({"_id": entry['_id']}, {'$set': {'rank': flag + 1}})
-
-                    self.add_task(func)
-            print '\n'
+        print '\n'
