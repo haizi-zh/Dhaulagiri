@@ -2,7 +2,6 @@
 import json
 import logging
 import re
-from lxml import etree
 
 from processors import BaseProcessor
 from utils.database import get_mongodb
@@ -556,10 +555,10 @@ class DianpingProcessor(BaseProcessor):
         """
         计算店铺的rating
         """
-        if 'reivew_stat' not in entry:
+        if 'review_stat' not in entry:
             return
 
-        review = entry['reivew_stat']
+        review = entry['review_stat']
         tmp = 0
         for idx in xrange(1, 6):
             key = 'reviewCountStar%d' % idx
@@ -627,7 +626,7 @@ class DianpingProcessor(BaseProcessor):
         url_hash = md5(image_url).hexdigest()
         image = {'url_hash': url_hash, 'key': url_hash, 'url': image_url}
         col_im = get_mongodb('imagestore', 'Images', 'mongo')
-        if not col_im.find_one({'key': image['key']}, {'_id':1}):
+        if not col_im.find_one({'key': image['key']}, {'_id': 1}):
             col = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
             col.update({'key': image['key']}, {'$set': image}, upsert=True)
         return image['key']
