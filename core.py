@@ -180,6 +180,46 @@ class DefaultTaskTracker(BaseTaskTracker):
     redis = property(__get_redis)
 
 
+class RedisClient(object):
+    @staticmethod
+    def _init_redis():
+        import redis
+        from utils import load_yaml
+
+        cfg = load_yaml()
+        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+        host = redis_conf['host']
+        port = int(redis_conf['port'])
+
+        return redis.StrictRedis(host=host, port=port, db=0)
+
+    def _get_redis(self):
+        return self._redis
+
+    redis = property(_get_redis)
+
+    def __init__(self):
+        self._redis = self._init_redis()
+
+    def get_cache(self, key, retrieve_func=None, expire=None, refresh=False):
+        """
+        获得缓存内容
+        :param key:
+        :param retrieve_func: 当key不存在的时候，通过这一函数来获得数据
+        :param expire: 指定过期时间（秒）
+        :param refresh: 强制刷新缓存
+        :return:
+        """
+        if (not self._redis.exists(key) or refresh) and retrieve_func:
+            value = retrieve_func()
+            self._redis.set(key, value)
+            if expire:
+                self._redis.expire(key, expire)
+            return value
+        else:
+            return self._redis.get(key)
+
+
 class ProcessorEngine(LoggerMixin):
     name = 'processor_engine'
 
@@ -192,6 +232,11 @@ class ProcessorEngine(LoggerMixin):
         return self._redis
 
     redis = property(_get_redis)
+
+    def _get_redis_cli(self):
+        return self._redis_client
+
+    redis_cli = property(_get_redis_cli)
 
     @classmethod
     def get_instance(cls):
@@ -285,6 +330,7 @@ class ProcessorEngine(LoggerMixin):
         args, leftover = parser.parse_known_args()
         self.arg_parser = parser
 
+        self._redis_client = RedisClient()
         self._redis = self._init_redis()
 
         # 获得TaskTracker
