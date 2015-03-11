@@ -1,5 +1,7 @@
 # coding=utf-8
 from hashlib import md5
+import json
+import logging
 import re
 
 import pymongo
@@ -244,8 +246,6 @@ class QunarCommentImport(BaseProcessor):
                     if 'user_name' in entry and entry['user_name']:
                         comment['authorName'] = entry['user_name']
 
-
-
         cursor = col_cmt.find(query).sort('source.qunar.id', pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
@@ -283,8 +283,12 @@ class QunarCommentSpider(BaseProcessor):
     """
     调用http://travel.qunar.com/place/api/html/comments/poi/3202964?sortField=1&img=true&pageSize=10&page=1接口，
     抓取去哪儿POI的评论数据
+
+    参数：
+
+    --type: 可选值为dining和shopping，用来指定抓取餐饮还是购物的评论信息。
     """
-    name = 'qunar-poi-comment'
+    name = 'qunar:poi-comment'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -301,6 +305,9 @@ class QunarCommentSpider(BaseProcessor):
 
     @staticmethod
     def validator(response):
+        """
+        验证返回结果，处理去哪儿限制爬虫的情况
+        """
         if response.status_code != 200 or 'security.qunar.com' in response.url:
             return False
         try:
@@ -315,7 +322,6 @@ class QunarCommentSpider(BaseProcessor):
         根据url获得最终的链接地址（处理重定向问题）
         """
         ret_url = url
-
         response = self.request.get(url, allow_redirects=False)
         if response.status_code in [301, 302]:
             try:
@@ -328,16 +334,14 @@ class QunarCommentSpider(BaseProcessor):
     def parse_comments(self, data):
         from lxml import etree
         from datetime import datetime, timedelta
-
-        comment_list = []
-
-        node_list = []
+        from hashlib import md5
 
         try:
             node_list = etree.fromstring(data, etree.HTMLParser()).xpath(
                 '//ul[@id="comment_box"]/li[contains(@class,"e_comment_item")]')
         except ValueError:
             self.logger.warn(data)
+            return
 
         for comment_node in node_list:
             comment = {'comment_id': int(re.search(r'cmt_item_(\d+)', comment_node.xpath('./@id')[0]).group(1))}
@@ -378,68 +382,92 @@ class QunarCommentSpider(BaseProcessor):
             tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_pic"]/a/img[@src]/@src')
             if tmp:
                 avatar = re.sub(r'\?\w$', '', tmp[0])
-                comment['user_avatar'] = self.resolve_avatar(avatar)
+
+                redis_cli = self.engine.redis_cli
+                redis_key = 'qunar:poi-comment:avatar:%s' % md5(avatar).hexdigest()
+                avatar_expire = 7 * 24 * 3600
+                comment['user_avatar'] = redis_cli.get_cache(redis_key, lambda: self.resolve_avatar(avatar),
+                                                             expire=avatar_expire)
 
             tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_name"]/a/text()')
             if tmp and tmp[0].strip():
                 comment['user_name'] = tmp[0].strip()
 
-            comment_list.append(comment)
+            yield comment
 
-        return comment_list
-
-    def populate_tasks(self):
-        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
+    def build_cursor(self, data_type):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[data_type]
         col = get_mongodb('poi', col_name, 'mongo')
-        col_raw = get_mongodb('raw_qunar', 'QunarPoiComment', 'mongo-raw')
-
         query = {'source.qunar.id': {'$ne': None}}
-        extra_query = eval(self.args.query) if self.args.query else {}
-        if extra_query:
-            query = {'$and': [query, extra_query]}
-
-        cursor = col.find(query, {'source.qunar.id'}).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.args.query:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.args.query)]}
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
+        return cursor
 
+    def process(self, entry):
+        """
+        开始处理评论列表
+        """
+        col_raw = get_mongodb('raw_qunar', 'PoiComment', 'mongo-raw')
         tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&pageSize=%d&page=%d'
+        qunar_id = entry['source']['qunar']['id']
+
+        page = 0
+        page_size = 50
+
+        while True:
+            page += 1
+            comments_list_url = tmpl % (qunar_id, page_size, page)
+            self.logger.debug('Fetching: poi: %d, page: %d, url: %s' % (qunar_id, page, comments_list_url))
+
+            redis_key = 'qunar:poi-comment:list:%d:%d:%d' % (qunar_id, page_size, page)
+
+            def get_comments_list():
+                """
+                获得评论列表的response body
+                """
+                response = self.request.get(comments_list_url, timeout=15,
+                                            user_data={'ProxyMiddleware': {'validator': self.validator}})
+                return response.text
+
+            redis_cli = self.engine.redis_cli
+            try:
+                comments_list_expire = 3600 * 24
+                search_result_text = redis_cli.get_cache(redis_key, get_comments_list, expire=comments_list_expire)
+                data = json.loads(search_result_text)
+            except (IOError, ValueError):
+                self.logger.warn('Fetching failed: %s' % comments_list_url)
+                break
+
+            if data['errmsg'] != 'success':
+                self.logger.warn('Fetching failed %s, errmsg: %s' % (comments_list_url, data['errmsg']))
+                break
+
+            tmp = self.parse_comments(data['data'])
+            comments = list(tmp) if tmp else []
+            for c in comments:
+                c['poi_id'] = qunar_id
+                # 如果该评论在数据库中已经存在，就不用再获取更旧的评论了
+                original_item = col_raw.find_and_modify({'comment_id': c['comment_id']}, {'$set': c},
+                                                        new=False, upsert=True)
+                if original_item:
+                    return
+
+            # 如果返回空列表，或者comments数量不足pageSize，说明已经到达最末页
+            if not comments or len(comments) < page_size:
+                return
+
+    def populate_tasks(self):
+        cursor = self.build_cursor(self.args.type)
 
         for val in cursor:
             def func(entry=val):
-                qunar_id = entry['source']['qunar']['id']
+                self.process(entry)
 
-                page = 1
-                page_size = 50
-                while True:
-                    url = tmpl % (qunar_id, page_size, page)
-                    self.logger.info('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
-
-                    try:
-                        response = self.request.get(url, timeout=15,
-                                                    user_data={'ProxyMiddleware': {'validator': self.validator}})
-                    except IOError:
-                        self.logger.warn('Failed to read %s due to IOError' % url)
-                        break
-
-                    data = response.json()
-                    if data['errmsg'] != 'success':
-                        self.logger.warn('Error while retrieving %s, errmsg: %s' % (url, data['errmsg']))
-                        break
-
-                    comments = self.parse_comments(response.json()['data'])
-                    for c in comments:
-                        c['poi_id'] = qunar_id
-                        col_raw.update({'comment_id': c['comment_id']}, {'$set': c}, upsert=True)
-
-                    # 如果返回空列表，或者comments数量不足pageSize，说明已经到达最末页
-                    if not comments or len(comments) < page_size:
-                        break
-
-                    page += 1
-                    continue
-
-            setattr(func, 'task_key', '%s:%d' % (self.name, val['source']['qunar']['id']))
             self.add_task(func)
 
 
