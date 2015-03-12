@@ -348,6 +348,7 @@ class QunarFetcher(BaseProcessor):
             def func(entry=val):
                 action.process(entry)
 
+            setattr(func, 'task_key', 'task:qunar.fetch:%s:%s' % (self.args.action, val['_id']))
             self.add_task(func)
 
 
@@ -358,10 +359,6 @@ class QunarCommentSpider(object):
     """
 
     def __init__(self, fetcher, context):
-        """
-        :param kwargs:
-         * type: 可选值为dining和shopping，用来指定抓取餐饮还是购物的评论信息。
-        """
         self.fetcher = fetcher
         self.request = fetcher.request
         self.logger = fetcher.logger
@@ -593,17 +590,18 @@ class QunarImageSpider(object):
         redis_key = 'qunar:poi-image:%d' % qunar_id
 
         def get_poi_images():
-            url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
-            self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, url))
+            image_list_url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
+            self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, image_list_url))
 
             try:
-                response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': qunar_validator}})
+                response = self.request.get(image_list_url,
+                                            user_data={'ProxyMiddleware': {'validator': qunar_validator}})
             except IOError as e:
-                self.logger.warn('IOError: %s' % url)
+                self.logger.warn('IOError: %s' % image_list_url)
                 raise e
 
             if not response:
-                self.logger.warn('IOError: %s' % url)
+                self.logger.warn('IOError: %s' % image_list_url)
                 raise IOError
 
             return json.dumps(response.json()['data'])
