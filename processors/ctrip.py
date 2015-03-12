@@ -121,9 +121,9 @@ class CtripAnswerClean(BaseProcessor):
                 else:
                     essence = False
 
-                tmp = dom[0].xpath('//a[@class = "btn_answer_zan"]/span/text()')[0]
+                tmp = dom[0].xpath('//a[@class = "btn_answer_zan"]/span/text()')
                 if tmp:
-                    favorCnt = tmp
+                    favorCnt = tmp[0]
                 else:
                     favorCnt = 0
                 avatar = 'http://you.ctrip.com' + dom[0].xpath('//a[@class = "answer_img"]/@href')[0]
