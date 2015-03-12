@@ -47,7 +47,7 @@ class Worker(object):
             if task_tracker:
                 # Task tracking机制已启用
                 if task_tracker.track(task):
-                    self.logger.info('Task %s bypassed' % getattr(task, 'task_key'))
+                    self.logger.debug('Task %s bypassed' % getattr(task, 'task_key'))
                     continue
 
             self.logger.debug('Task #%d started' % self.total_tasks)
