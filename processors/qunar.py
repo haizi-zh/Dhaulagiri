@@ -178,12 +178,34 @@ class QunarPoiProcessor(BaseProcessor):
                 self.add_task(func)
 
 
+def status_code_validator(response, allowed_codes):
+    return response.status_code in allowed_codes
+
+
+def security_validator(response):
+    return 'security.qunar.com' not in response.url
+
+
 def qunar_validator(response):
     """
     验证返回结果，处理去哪儿限制爬虫的情况
     """
-    if response.status_code != 200 or 'security.qunar.com' in response.url:
+    return status_code_validator(response, [200]) and security_validator(response)
+
+
+def qunar_size_validator(response, min_size=None, max_size=None):
+    """
+    根据response的size进行验证
+    """
+    sz = len(response.text)
+    if min_size and sz < min_size:
         return False
+    if max_size and sz > max_size:
+        return False
+    return True
+
+
+def qunar_json_validator(response):
     try:
         response.json()['data']
     except (ValueError, KeyError):
@@ -222,6 +244,7 @@ class QunarFetcher(BaseProcessor):
         fetcher = self
         actions = {
             'comment-spider': QunarCommentSpider(fetcher, context),
+            'poi-spider': QunarPoiSpider(fetcher, context),
             'image-spider': QunarImageSpider(fetcher, context),
             'comment-proc': QunarCommentProcessor(fetcher, context)
         }
@@ -251,6 +274,59 @@ class QunarFetcher(BaseProcessor):
 
             setattr(func, 'task_key', 'task:qunar.fetch:%s:%s' % (self.args.action, val['_id']))
             self.add_task(func)
+
+
+class QunarPoiSpider(object):
+    """
+    补充去哪儿POI的数据（主要是评分）
+    """
+
+    def __init__(self, fetcher, context):
+        self.fetcher = fetcher
+        self.request = fetcher.request
+        self.logger = fetcher.logger
+        self.redis = fetcher.engine.redis_cli
+        self.context = context
+
+    def build_cursor(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
+        col = get_mongodb('poi', col_name, 'mongo')
+        query = {'source.qunar.id': {'$ne': None}}
+        if self.context['query']:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.context['query'])]}
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.context['limit']:
+            cursor.limit(self.context['limit'])
+        cursor.skip(self.context['skip'])
+        return cursor
+
+    def process(self, entry):
+        qunar_id = entry['source']['qunar']['id']
+        poi_url = 'http://travel.qunar.com/p-oi%d' % qunar_id
+
+        def val_func(v):
+            min_size = 4 * 1024
+            return qunar_size_validator(v, min_size) and security_validator(v) and status_code_validator(v, [200, 404])
+
+        response = self.request.get(poi_url, timeout=15, user_data={'ProxyMiddleware': {'validator': val_func}})
+        if response.status_code == 404:
+            return
+
+        from lxml import etree
+
+        tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
+        try:
+            score_text = tree_node.xpath('//div[@class="scorebox clrfix"]/span[@class="cur_score"]/text()')[0]
+            score = float(score_text)
+        except (IndexError, ValueError):
+            self.logger.warn('Failed to get rating: %s' % poi_url)
+            return
+
+        if score > 0:
+            col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
+            col = get_mongodb('poi', col_name, 'mongo')
+            col.update({'_id': entry['_id']}, {'$set': {'rating': score}})
 
 
 class QunarCommentSpider(object):
@@ -378,8 +454,9 @@ class QunarCommentSpider(object):
                 """
                 获得评论列表的response body
                 """
+                validators = [qunar_validator, qunar_json_validator]
                 response = self.request.get(comments_list_url, timeout=15,
-                                            user_data={'ProxyMiddleware': {'validator': qunar_validator}})
+                                            user_data={'ProxyMiddleware': {'validator': validators}})
                 return response.text
 
             try:
@@ -442,8 +519,9 @@ class QunarImageSpider(object):
             self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, image_list_url))
 
             try:
+                validators = [qunar_validator, qunar_json_validator]
                 response = self.request.get(image_list_url,
-                                            user_data={'ProxyMiddleware': {'validator': qunar_validator}})
+                                            user_data={'ProxyMiddleware': {'validator': validators}})
             except IOError as e:
                 self.logger.warn('IOError: %s' % image_list_url)
                 raise e
