@@ -226,7 +226,7 @@ class BaseProcessor(LoggerMixin):
 
     def add_task(self, task, *args, **kwargs):
         # 是否启用流量控制
-        flow_control = False
+        flow_control = True
         while flow_control:
             # 如果self.tasks中的项目过多，则暂停添加
             if self.tasks.qsize() > self.maxsize:
