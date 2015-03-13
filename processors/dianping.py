@@ -88,12 +88,10 @@ def response_size_validator(response, min_size=None, max_size=None):
     return True
 
 
-class DianpingComment(BaseProcessor):
+class DianpingFetcher(BaseProcessor):
     """
     抓取大众点评的评论数据
     """
-
-    name = 'dianping-comment'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
@@ -104,6 +102,7 @@ class DianpingComment(BaseProcessor):
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=str)
+        parser.add_argument('--batch-size', type=int)
         args, leftover = parser.parse_known_args()
         return args
 
@@ -119,6 +118,8 @@ class DianpingComment(BaseProcessor):
         if self.args.limit:
             cursor.limit(self.args.limit)
         cursor.skip(self.args.skip)
+        if self.args.batch_size:
+            cursor.batch_size(self.args.batch_size)
         return cursor
 
     def populate_tasks(self):
@@ -128,8 +129,19 @@ class DianpingComment(BaseProcessor):
             def task(entry=val):
                 self.process(entry)
 
-            setattr(task, 'task_key', 'task:dianping-comment:%d' % val['shop_id'])
+            setattr(task, 'task_key', 'task:%s:%d' % (self.name, val['shop_id']))
             self.add_task(task)
+
+    def process(self, entry):
+        raise NotImplementedError
+
+
+class DianpingCommentSpider(DianpingFetcher):
+    """
+    抓取大众点评POI的评论
+    """
+
+    name = 'dianping-comment'
 
     def process(self, entry):
         shop_id = entry['shop_id']
@@ -171,7 +183,6 @@ class DianpingComment(BaseProcessor):
             user_name = image_node.xpath('./@title')[0].strip()
             user_avatar = image_node.xpath('./@src')[0].strip()
 
-            'http://j2.s2.dpfile.com/pc/5a20a962d11fc4718fe83cfdae95cd7f(48c48)/thumb.jpg">'
             pattern = re.compile(r'(/pc/[0-9a-z]{32})\(\d+[cx]\d+\)/')
             if re.search(pattern, user_avatar):
                 user_avatar = re.sub(pattern, '\\1(1024c1024)/', user_avatar)
@@ -180,7 +191,7 @@ class DianpingComment(BaseProcessor):
                 comment['user_name'] = user_name
             if user_avatar:
                 comment['user_avatar'] = user_avatar
-        except KeyError:
+        except IndexError:
             pass
 
         try:
@@ -198,7 +209,7 @@ class DianpingComment(BaseProcessor):
             contents = ''.join(text_components).strip()
             if contents:
                 comment['contents'] = contents
-        except KeyError:
+        except IndexError:
             pass
 
         try:
@@ -207,7 +218,7 @@ class DianpingComment(BaseProcessor):
             match = re.search(r'irr-star(\d+)', rating_class)
             if match:
                 comment['rating'] = float(match.group(1)) / 50
-        except KeyError:
+        except IndexError:
             pass
 
         try:
@@ -216,7 +227,7 @@ class DianpingComment(BaseProcessor):
             ts = self.parse_comment_time(time_text)
             if ts:
                 comment['ctime'] = ts
-        except KeyError:
+        except IndexError:
             pass
 
         return comment
@@ -226,7 +237,7 @@ class DianpingComment(BaseProcessor):
 
         delta_ts = timedelta(seconds=8 * 3600)
 
-        def guess_year(date, tz_shift=8):
+        def guess_year(date):
             """
             传入的date可能缺失年份信息。比如：03/15。这样，只能取和当前时间最接近的年份。
             默认传入的date为东八区时间
@@ -270,6 +281,56 @@ class DianpingComment(BaseProcessor):
 
         self.logger.warn('Invalid time string: %s' % time_text)
         return
+
+
+class DianpingImageSpider(DianpingFetcher):
+    """
+    抓取点评POI的照片
+    """
+
+    name = 'dianping-image'
+
+    def process(self, entry):
+        shop_id = entry['shop_id']
+        self.get_poi_image(shop_id)
+
+    def get_poi_image(self, shop_id, page_idx=1):
+        template = 'http://www.dianping.com/shop/%d/photos?pg=%d'
+        album_url = template % (shop_id, page_idx)
+
+        validators = [lambda v: status_code_validator(v, [200, 404]),
+                      lambda v: response_size_validator(v, 4096)]
+
+        response = self.request.get(album_url, timeout=15, user_data={'ProxyMiddleware': {'validator': validators}})
+
+        from lxml import etree
+        from hashlib import md5
+
+        col = get_mongodb('raw_dianping', 'DianpingImage', 'mongo-raw')
+        root_node = etree.fromstring(response.text, parser=etree.HTMLParser())
+        for image_node in root_node.xpath('//div[@class="picture-list"]/ul/li[@class="J_list"]'):
+            try:
+                image_title = image_node.xpath(
+                    './div[@class="picture-info"]/div[@class="name"]//a[@href and @title and @onclick]/@title')[0]
+                if u'默认图片' in image_title:
+                    continue
+            except IndexError:
+                continue
+
+            try:
+                image_src = image_node.xpath('./div[@class="img"]/a[@href and @onclick]/img[@src and @title]/@src')[0]
+                pattern = re.compile(r'(/pc/[0-9a-z]{32})\(\d+[cx]\d+\)/')
+                match = re.search(pattern, image_src)
+                if not match:
+                    continue
+
+                image_src = re.sub(pattern, '\\1(1024c1024)/', image_src)
+                key = md5(image_src).hexdigest()
+                image_entry = {'url_hash': key, 'key': key, 'url': image_src}
+
+                col.update({'key': key}, {'$set': image_entry}, upsert=True)
+            except IndexError:
+                continue
 
 
 class DianpingMatcher(BaseProcessor):
