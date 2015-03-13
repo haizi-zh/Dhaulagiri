@@ -324,7 +324,7 @@ class QunarPoiSpider(object):
         tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
         try:
             score_text = tree_node.xpath('//div[@class="scorebox clrfix"]/span[@class="cur_score"]/text()')[0]
-            score = float(score_text)
+            score = float(score_text) / 5.0
         except (IndexError, ValueError):
             self.logger.warn('Failed to get rating: %s' % poi_url)
             return

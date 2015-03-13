@@ -326,7 +326,7 @@ class DianpingImageSpider(DianpingFetcher):
 
                 image_src = re.sub(pattern, '\\1(1024c1024)/', image_src)
                 key = md5(image_src).hexdigest()
-                image_entry = {'url_hash': key, 'key': key, 'url': image_src}
+                image_entry = {'url_hash': key, 'key': key, 'url': image_src, 'shop_id': shop_id}
 
                 col.update({'key': key}, {'$set': image_entry}, upsert=True)
             except IndexError:

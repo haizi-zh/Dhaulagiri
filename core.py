@@ -270,8 +270,8 @@ class ProcessorEngine(LoggerMixin):
         if not args.track:
             return
 
-        # 默认有效期为1天
-        expire = 3600 * 24
+        # 默认有效期为3天
+        expire = 3600 * 24 * 3
 
         if args.track_exp:
             match = re.search(r'([\d\.]+)(\w)', args.track_exp)
