@@ -115,8 +115,6 @@ class DianpingComment(BaseProcessor):
             exec 'from bson import ObjectId'
             query = eval(self.args.query)
 
-        query = {'shop_id': 3578044}
-
         cursor = col.find(query, {'shop_id': 1})
         if self.args.limit:
             cursor.limit(self.args.limit)
@@ -135,9 +133,9 @@ class DianpingComment(BaseProcessor):
 
     def process(self, entry):
         shop_id = entry['shop_id']
-        self.parse_comment_page(shop_id, 1)
+        self.parse_comment_page(shop_id)
 
-    def parse_comment_page(self, shop_id, page_idx):
+    def parse_comment_page(self, shop_id, page_idx=1):
         template = 'http://www.dianping.com/shop/%d/review_all?pageno=%d'
         comment_url = template % (shop_id, page_idx)
 
@@ -148,47 +146,130 @@ class DianpingComment(BaseProcessor):
 
         from lxml import etree
 
+        col = get_mongodb('raw_dianping', 'DianpingComment', 'mongo-raw')
         root_node = etree.fromstring(response.text, parser=etree.HTMLParser())
         for comment_node in root_node.xpath('//div[@class="comment-list"]/ul/li[@data-id and @id]'):
-            comment = {}
+            comment = self.parse_comment_details(shop_id, comment_node)
+            col.update({'comment_id': comment['comment_id']}, {'$set': comment}, upsert=True)
 
-            comment_id = int(comment_node.xpath('./@data-id')[0])
-            comment['comment_id'] = comment_id
+        # 查看其它的页面
+        if page_idx == 1:
+            pages = map(int, root_node.xpath('//div[@class="Pages"]/a[@href and @data-pg]/@data-pg'))
+            if not pages:
+                return
+            for page_idx in xrange(2, max(pages) + 1):
+                self.parse_comment_page(shop_id, page_idx)
 
-            try:
-                image_node = comment_node.xpath('./div[@class="pic"]/a[@user-id]/img[@title and @src]')[0]
-                user_name = image_node.xpath('./@title')[0].strip()
-                user_avatar = image_node.xpath('./@src')[0].strip()
+    def parse_comment_details(self, shop_id, comment_node):
+        comment = {'shop_id': shop_id}
 
-                'http://j2.s2.dpfile.com/pc/5a20a962d11fc4718fe83cfdae95cd7f(48c48)/thumb.jpg">'
-                pattern = re.compile(r'(/pc/[0-9a-z]{32})\(\d+[cx]\d+\)/')
-                if re.search(pattern, user_avatar):
-                    user_avatar = re.sub(pattern, '\\1(1024c1024)/')
+        comment_id = int(comment_node.xpath('./@data-id')[0])
+        comment['comment_id'] = comment_id
 
-                if user_name:
-                    comment['user_name'] = user_name
-                if user_avatar:
-                    comment['user_avatar'] = user_avatar
-            except KeyError:
-                pass
+        try:
+            image_node = comment_node.xpath('./div[@class="pic"]/a[@user-id]/img[@title and @src]')[0]
+            user_name = image_node.xpath('./@title')[0].strip()
+            user_avatar = image_node.xpath('./@src')[0].strip()
 
-            try:
-                text_node = comment_node.xpath('./div[@class="content"]/div[@class="comment-txt"]'
-                                               '/div[@class="J_brief-cont"]')[0]
-                for br_node in text_node.xpath('.//br'):
-                    br_node.tail = '\n' + br_node.tail if br_node.tail else '\n'
+            'http://j2.s2.dpfile.com/pc/5a20a962d11fc4718fe83cfdae95cd7f(48c48)/thumb.jpg">'
+            pattern = re.compile(r'(/pc/[0-9a-z]{32})\(\d+[cx]\d+\)/')
+            if re.search(pattern, user_avatar):
+                user_avatar = re.sub(pattern, '\\1(1024c1024)/', user_avatar)
 
-                text_components = []
-                for txt in text_node.itertext():
-                    if not txt or not txt.strip():
-                        continue
-                    else:
-                        text_components.append(txt.strip(' '))
-                contents = ''.join(text_components).strip()
-                if contents:
-                    comment['contents'] = contents
-            except KeyError:
-                pass
+            if user_name:
+                comment['user_name'] = user_name
+            if user_avatar:
+                comment['user_avatar'] = user_avatar
+        except KeyError:
+            pass
+
+        try:
+            text_node = comment_node.xpath('./div[@class="content"]/div[@class="comment-txt"]'
+                                           '/div[@class="J_brief-cont"]')[0]
+            for br_node in text_node.xpath('.//br'):
+                br_node.tail = '\n' + br_node.tail if br_node.tail else '\n'
+
+            text_components = []
+            for txt in text_node.itertext():
+                if not txt or not txt.strip():
+                    continue
+                else:
+                    text_components.append(txt.strip(' '))
+            contents = ''.join(text_components).strip()
+            if contents:
+                comment['contents'] = contents
+        except KeyError:
+            pass
+
+        try:
+            rating_class = comment_node.xpath('./div[@class="content"]/div[@class="user-info"]'
+                                              '/span[@title and @class]/@class')[0]
+            match = re.search(r'irr-star(\d+)', rating_class)
+            if match:
+                comment['rating'] = float(match.group(1)) / 50
+        except KeyError:
+            pass
+
+        try:
+            time_text = comment_node.xpath('./div[@class="content"]/div[@class="misc-info"]'
+                                           '/span[@class="time"]/text()')[0]
+            ts = self.parse_comment_time(time_text)
+            if ts:
+                comment['ctime'] = ts
+        except KeyError:
+            pass
+
+        return comment
+
+    def parse_comment_time(self, time_text):
+        from datetime import datetime, timedelta
+
+        delta_ts = timedelta(seconds=8 * 3600)
+
+        def guess_year(date, tz_shift=8):
+            """
+            传入的date可能缺失年份信息。比如：03/15。这样，只能取和当前时间最接近的年份。
+            默认传入的date为东八区时间
+            """
+            cur_date = datetime.utcnow()
+            init_year = cur_date.year + 1
+
+            while True:
+                try_date = datetime(init_year, date.month, date.day, date.hour, date.minute, date.second,
+                                    date.microsecond) - delta_ts
+                if try_date < cur_date:
+                    return try_date
+                else:
+                    init_year -= 1
+
+        pattern = r'(\d{2}-?){2,3} \d{2}:\d{2}'
+        match = re.search(pattern, time_text)
+        if match:
+            time_text = match.group()
+            if len(re.findall(r'(\d{2}-)', time_text)) == 1:
+                format_str = '%m-%d %H:%M'
+                ts = guess_year(datetime.strptime(time_text, format_str))
+            else:
+                format_str = '%y-%m-%d %H:%M'
+                ts = datetime.strptime(time_text, format_str) - delta_ts
+
+            return long((ts - datetime.utcfromtimestamp(0)).total_seconds()) * 1000
+
+        pattern = r'(\d{2}-?){2,3}'
+        match = re.search(pattern, time_text)
+        if match:
+            time_text = match.group()
+            if len(re.findall(r'(\d{2}-)', time_text)) == 1:
+                format_str = '%m-%d'
+                ts = guess_year(datetime.strptime(time_text, format_str))
+            else:
+                format_str = '%y-%m-%d'
+                ts = datetime.strptime(time_text, format_str) - delta_ts
+
+            return long((ts - datetime.utcfromtimestamp(0)).total_seconds()) * 1000
+
+        self.logger.warn('Invalid time string: %s' % time_text)
+        return
 
 
 class DianpingMatcher(BaseProcessor):
