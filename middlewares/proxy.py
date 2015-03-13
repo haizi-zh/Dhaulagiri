@@ -169,7 +169,16 @@ class ProxyMiddleware(DownloadMiddleware):
             except KeyError:
                 pass
 
-        success = validator(response)
+        if not hasattr(validator, '__iter__'):
+            validator_list = [validator]
+        else:
+            validator_list = validator
+
+        success = True
+        for v in validator_list:
+            success = success and v(response)
+            if not success:
+                break
         result['success'] = success
 
         tmp = response.connection.proxy_manager.keys()

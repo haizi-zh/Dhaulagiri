@@ -89,8 +89,8 @@ class LoggerMixin(object):
 
 class TaskTrackerFactory(object):
     @classmethod
-    def get_instance(cls, tracker_name, expire):
-        return DefaultTaskTracker(expire)
+    def get_instance(cls, engine, tracker_name, expire):
+        return RedisTaskTracker(engine.redis_cli, expire)
 
 
 class BaseTaskTracker(object):
@@ -116,68 +116,85 @@ class BaseTaskTracker(object):
         raise NotImplementedError
 
 
-class DefaultTaskTracker(BaseTaskTracker):
-    def __init__(self, expire):
-        BaseTaskTracker.__init__(self)
+class RedisTaskTracker(BaseTaskTracker):
+    """
+    使用Redis作为TaskTracker
+    """
+    def __init__(self, redis, expire):
+        """
+        初始化
 
-        self.__redis = None
+        :param redis: RedisClient对象
+        :param expire: Task的过期时间
+        :return:
+        """
+        self.__redis = redis
         self.expire = expire
 
-        from threading import Lock
-
-        self.__redis_lock = Lock()
-
     def track(self, task):
-        r = self.redis
-
-        if not r:
-            return False
-
+        r = self.__redis
         task_key = getattr(task, 'task_key', None)
         if not task_key:
-            return False
-
-        ret = r.get(task_key)
-        if not ret:
             return False
         else:
-            # 判断是否过期
-            return time() < float(ret) + self.expire
+            return r.exists(task_key)
 
     def update(self, task):
-        r = self.redis
-        if not r:
-            return False
-
+        r = self.__redis
         task_key = getattr(task, 'task_key', None)
-        if not task_key:
-            return
+        if task_key:
+            r.set(task_key, True, self.expire)
 
-        r.set(task_key, time())
 
-    def __get_redis(self):
-        if not self.__redis:
-            try:
-                self.__redis_lock.acquire()
-                if not self.__redis:
-                    import redis
+class RedisClient(object):
+    @staticmethod
+    def _init_redis():
+        import redis
+        from utils import load_yaml
 
-                    from utils import load_yaml
+        cfg = load_yaml()
+        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+        host = redis_conf['host']
+        port = int(redis_conf['port'])
 
-                    cfg = load_yaml()
-                    redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
-                    host = redis_conf['host']
-                    port = int(redis_conf['port'])
+        return redis.StrictRedis(host=host, port=port, db=0)
 
-                    self.__redis = redis.StrictRedis(host=host, port=port, db=0)
-            except (KeyError, IOError, IndexError):
-                self.__redis = None
-            finally:
-                self.__redis_lock.release()
+    def _get_redis(self):
+        return self._redis
 
-        return self.__redis
+    redis = property(_get_redis)
 
-    redis = property(__get_redis)
+    def __init__(self):
+        self._redis = self._init_redis()
+
+    def get(self, key):
+        return self._redis.get(key)
+
+    def set(self, key, value, expire=None):
+        self._redis.set(key, value)
+        if expire:
+            self._redis.expire(key, expire)
+
+    def exists(self, key):
+        return self._redis.exists(key)
+
+    def get_cache(self, key, retrieve_func=None, expire=None, refresh=False):
+        """
+        获得缓存内容
+        :param key:
+        :param retrieve_func: 当key不存在的时候，通过这一函数来获得数据
+        :param expire: 指定过期时间（秒）
+        :param refresh: 强制刷新缓存
+        :return:
+        """
+        if (not self._redis.exists(key) or refresh) and retrieve_func:
+            value = retrieve_func()
+            self._redis.set(key, value)
+            if expire:
+                self._redis.expire(key, expire)
+            return value
+        else:
+            return self._redis.get(key)
 
 
 class ProcessorEngine(LoggerMixin):
@@ -187,6 +204,11 @@ class ProcessorEngine(LoggerMixin):
     __lock = BoundedSemaphore(1)
 
     __instance = None
+
+    def _get_redis_cli(self):
+        return self._redis_client
+
+    redis_cli = property(_get_redis_cli)
 
     @classmethod
     def get_instance(cls):
@@ -244,10 +266,12 @@ class ProcessorEngine(LoggerMixin):
 
         return processor_dict
 
-    @staticmethod
-    def parse_tracking(args):
-        # 默认有效期为1天
-        expire = 3600 * 24
+    def parse_tracking(self, args):
+        if not args.track:
+            return
+
+        # 默认有效期为3天
+        expire = 3600 * 24 * 3
 
         if args.track_exp:
             match = re.search(r'([\d\.]+)(\w)', args.track_exp)
@@ -262,7 +286,8 @@ class ProcessorEngine(LoggerMixin):
             elif unit == 's':
                 expire = val
 
-        return TaskTrackerFactory.get_instance(args.track, expire) if args.track else None
+        engine = self
+        return TaskTrackerFactory.get_instance(engine, args.track, expire)
 
     def __init__(self):
         import argparse
@@ -280,6 +305,8 @@ class ProcessorEngine(LoggerMixin):
         args, leftover = parser.parse_known_args()
         self.arg_parser = parser
 
+        self._redis_client = RedisClient()
+
         # 获得TaskTracker
         self.task_tracker = self.parse_tracking(args)
 
@@ -290,6 +317,18 @@ class ProcessorEngine(LoggerMixin):
         self.processors = {}
 
         self.log('Engine init completed')
+
+    @staticmethod
+    def _init_redis():
+        import redis
+        from utils import load_yaml
+
+        cfg = load_yaml()
+        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
+        host = redis_conf['host']
+        port = int(redis_conf['port'])
+
+        return redis.StrictRedis(host=host, port=port, db=0)
 
     def add_processor(self, name):
         if name not in self.processor_store:
