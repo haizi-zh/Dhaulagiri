@@ -27,8 +27,8 @@ class Worker(object):
             self.processor.update_worker_status(self)
 
             self.idle = True
-            self.logger.debug('Retrieving next task... (fetched: %d, success: %d, fail: %d)'
-                              % (self.total_tasks, self.success_cnt, self.fail_cnt))
+            self.logger.debug('Retrieving next task... (fetched: %d, success: %d, fail: %d, bypassed: %d)'
+                              % (self.total_tasks, self.success_cnt, self.fail_cnt, self.bypassed_cnt))
             try:
                 task = self._task_queue.get(block=True)
             except Empty:
@@ -43,11 +43,13 @@ class Worker(object):
                               ('(%s)' % task_key if task_key else '', self._task_queue.qsize()))
 
             self.total_tasks += 1
+            self.processor.incr_progress()
 
             if task_tracker:
                 # Task tracking机制已启用
                 if task_tracker.track(task):
                     self.logger.debug('Task %s bypassed' % getattr(task, 'task_key'))
+                    self.bypassed_cnt += 1
                     continue
 
             self.logger.debug('Task #%d started' % self.total_tasks)
@@ -78,7 +80,6 @@ class Worker(object):
                 task_tracker.update(task)
 
             self.logger.debug('Task #%d completed' % self.total_tasks)
-            self.processor.incr_progress()
 
             gevent.sleep(0)
 
@@ -95,6 +96,8 @@ class Worker(object):
         self.success_cnt = 0
         # 失败统计
         self.fail_cnt = 0
+        # 忽略统计
+        self.bypassed_cnt = 0
         # 执行任务总数
         self.total_tasks = 0
 
