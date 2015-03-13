@@ -511,29 +511,18 @@ class QunarImageSpider(object):
     def process(self, entry):
         qunar_id = entry['source']['qunar']['id']
 
-        # 在redis中查询
-        redis_key = 'qunar:poi-image:%d' % qunar_id
+        image_list_url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
+        self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, image_list_url))
 
-        def get_poi_images():
-            image_list_url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
-            self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, image_list_url))
+        try:
+            validators = [qunar_validator, qunar_json_validator]
+            response = self.request.get(image_list_url,
+                                        user_data={'ProxyMiddleware': {'validator': validators}})
+            images = response.json()['data']
+        except (IOError, ValueError, KeyError) as e:
+            self.logger.warn('Failed: %s' % image_list_url)
+            return
 
-            try:
-                validators = [qunar_validator, qunar_json_validator]
-                response = self.request.get(image_list_url,
-                                            user_data={'ProxyMiddleware': {'validator': validators}})
-            except IOError as e:
-                self.logger.warn('IOError: %s' % image_list_url)
-                raise e
-
-            if not response:
-                self.logger.warn('IOError: %s' % image_list_url)
-                raise IOError
-
-            return json.dumps(response.json()['data'])
-
-        images_expire = 24 * 3600
-        images = json.loads(self.redis.get_cache(redis_key, get_poi_images, expire=images_expire))
         if not images:
             return
 
