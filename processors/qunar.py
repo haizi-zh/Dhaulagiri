@@ -238,7 +238,8 @@ class QunarFetcher(BaseProcessor):
             'limit': self.args.limit,
             'skip': self.args.skip,
             'query': self.args.query,
-            'type': self.args.type
+            'type': self.args.type,
+            'batch_size': self.args.batch_size
         }
 
         fetcher = self
@@ -260,6 +261,7 @@ class QunarFetcher(BaseProcessor):
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=str)
+        parser.add_argument('--batch-size', type=int)
         parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
         args, leftover = parser.parse_known_args()
         return args
@@ -299,6 +301,10 @@ class QunarPoiSpider(object):
         if self.context['limit']:
             cursor.limit(self.context['limit'])
         cursor.skip(self.context['skip'])
+        if self.context['batch_size']:
+            sz = self.context['batch_size']
+            self.logger.warn('Set the cursor batch size to %d' % sz)
+            cursor.batch_size(sz)
         return cursor
 
     def process(self, entry):
