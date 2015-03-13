@@ -72,6 +72,125 @@ class FactoryBuilder(object):
             raise ValueError('Invalid factory name: %s' % factory_name)
 
 
+def status_code_validator(response, allowed_codes):
+    return response.status_code in allowed_codes
+
+
+def response_size_validator(response, min_size=None, max_size=None):
+    """
+    根据response的size进行验证
+    """
+    sz = len(response.text)
+    if min_size and sz < min_size:
+        return False
+    if max_size and sz > max_size:
+        return False
+    return True
+
+
+class DianpingComment(BaseProcessor):
+    """
+    抓取大众点评的评论数据
+    """
+
+    name = 'dianping-comment'
+
+    def __init__(self, *args, **kwargs):
+        BaseProcessor.__init__(self, *args, **kwargs)
+        self.args = self.args_builder()
+
+    def args_builder(self):
+        parser = self.arg_parser
+        parser.add_argument('--limit', default=None, type=int)
+        parser.add_argument('--skip', default=0, type=int)
+        parser.add_argument('--query', type=str)
+        args, leftover = parser.parse_known_args()
+        return args
+
+    def build_cursor(self):
+        col = get_mongodb('raw_dianping', 'Dining', 'mongo-raw')
+
+        query = {}
+        if self.args.query:
+            exec 'from bson import ObjectId'
+            query = eval(self.args.query)
+
+        query = {'shop_id': 3578044}
+
+        cursor = col.find(query, {'shop_id': 1})
+        if self.args.limit:
+            cursor.limit(self.args.limit)
+        cursor.skip(self.args.skip)
+        return cursor
+
+    def populate_tasks(self):
+        cursor = self.build_cursor()
+
+        for val in cursor:
+            def task(entry=val):
+                self.process(entry)
+
+            setattr(task, 'task_key', 'task:dianping-comment:%d' % val['shop_id'])
+            self.add_task(task)
+
+    def process(self, entry):
+        shop_id = entry['shop_id']
+        self.parse_comment_page(shop_id, 1)
+
+    def parse_comment_page(self, shop_id, page_idx):
+        template = 'http://www.dianping.com/shop/%d/review_all?pageno=%d'
+        comment_url = template % (shop_id, page_idx)
+
+        validators = [lambda v: status_code_validator(v, [200, 404]),
+                      lambda v: response_size_validator(v, 4096)]
+
+        response = self.request.get(comment_url, timeout=15, user_data={'ProxyMiddleware': {'validator': validators}})
+
+        from lxml import etree
+
+        root_node = etree.fromstring(response.text, parser=etree.HTMLParser())
+        for comment_node in root_node.xpath('//div[@class="comment-list"]/ul/li[@data-id and @id]'):
+            comment = {}
+
+            comment_id = int(comment_node.xpath('./@data-id')[0])
+            comment['comment_id'] = comment_id
+
+            try:
+                image_node = comment_node.xpath('./div[@class="pic"]/a[@user-id]/img[@title and @src]')[0]
+                user_name = image_node.xpath('./@title')[0].strip()
+                user_avatar = image_node.xpath('./@src')[0].strip()
+
+                'http://j2.s2.dpfile.com/pc/5a20a962d11fc4718fe83cfdae95cd7f(48c48)/thumb.jpg">'
+                pattern = re.compile(r'(/pc/[0-9a-z]{32})\(\d+[cx]\d+\)/')
+                if re.search(pattern, user_avatar):
+                    user_avatar = re.sub(pattern, '\\1(1024c1024)/')
+
+                if user_name:
+                    comment['user_name'] = user_name
+                if user_avatar:
+                    comment['user_avatar'] = user_avatar
+            except KeyError:
+                pass
+
+            try:
+                text_node = comment_node.xpath('./div[@class="content"]/div[@class="comment-txt"]'
+                                               '/div[@class="J_brief-cont"]')[0]
+                for br_node in text_node.xpath('.//br'):
+                    br_node.tail = '\n' + br_node.tail if br_node.tail else '\n'
+
+                text_components = []
+                for txt in text_node.itertext():
+                    if not txt or not txt.strip():
+                        continue
+                    else:
+                        text_components.append(txt.strip(' '))
+                contents = ''.join(text_components).strip()
+                if contents:
+                    comment['contents'] = contents
+            except KeyError:
+                pass
+
+
 class DianpingMatcher(BaseProcessor):
     """
     和大众点评的数据进行关联
