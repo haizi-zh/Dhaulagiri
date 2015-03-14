@@ -40,17 +40,21 @@ class LoggerMixin(object):
         import argparse
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('--verbose', action='store_true')
+        parser.add_argument('--quiet', action='store_true')
+        parser.add_argument('--log2file', action='store_true')
         parser.add_argument('--debug', action='store_true')
         parser.add_argument('--logpath', type=str)
         args, leftovers = parser.parse_known_args()
 
         if 'logging' not in dhaulagiri_settings:
-            dhaulagiri_settings['logging']={}
-        if args.verbose:
-            dhaulagiri_settings['logging']['write_to_file'] = False
+            dhaulagiri_settings['logging'] = {}
+
+        if args.log2file:
+            dhaulagiri_settings['logging']['write_to_file'] = True
+        if args.quiet:
+            dhaulagiri_settings['logging']['write_to_stream'] = False
         if args.debug:
-            dhaulagiri_settings['logging']['log_level']=logging.DEBUG
+            dhaulagiri_settings['logging']['log_level'] = logging.DEBUG
         if args.logpath:
             dhaulagiri_settings['logging']['log_path'] = args.logpath
 
@@ -68,9 +72,10 @@ class LoggerMixin(object):
         sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
         logger = logging.getLogger('%s-%s' % (name, sig))
 
-        if not dhaulagiri_settings['logging']['write_to_file']:
-            handler = StreamHandler()
-        else:
+        handler_list = []
+        if dhaulagiri_settings['logging']['write_to_stream']:
+            handler_list.append(StreamHandler())
+        if dhaulagiri_settings['logging']['write_to_file']:
             log_path = os.path.abspath(dhaulagiri_settings['logging']['log_path'])
 
             try:
@@ -79,16 +84,20 @@ class LoggerMixin(object):
                 pass
 
             log_file = os.path.normpath(os.path.join(log_path, '%s.log' % name))
-            handler = TimedRotatingFileHandler(log_file, when='d', interval=1, encoding='utf-8')
+            handler = TimedRotatingFileHandler(log_file, when='D', interval=1, encoding='utf-8')
+            handler_list.append(handler)
 
         log_level = dhaulagiri_settings['logging']['log_level']
-        handler.setLevel(log_level)
-
         formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
                               datefmt='%Y-%m-%d %H:%M:%S%z')
-        handler.setFormatter(formatter)
 
-        logger.addHandler(handler)
+        if not handler_list:
+            handler_list.append(logging.NullHandler())
+        for handler in handler_list:
+            handler.setLevel(log_level)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
         logger.setLevel(log_level)
 
         return logger
