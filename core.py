@@ -105,8 +105,8 @@ class LoggerMixin(object):
 
 class TaskTrackerFactory(object):
     @classmethod
-    def get_instance(cls, engine, tracker_name, expire):
-        return RedisTaskTracker(engine.redis_cli, expire)
+    def get_instance(cls):
+        return RedisTaskTracker()
 
 
 class BaseTaskTracker(object):
@@ -137,16 +137,9 @@ class RedisTaskTracker(BaseTaskTracker):
     使用Redis作为TaskTracker
     """
 
-    def __init__(self, redis, expire):
-        """
-        初始化
-
-        :param redis: RedisClient对象
-        :param expire: Task的过期时间
-        :return:
-        """
-        self.__redis = redis
-        self.expire = expire
+    def __init__(self):
+        self.__redis = RedisClient('task-tracker')
+        self.expire = dhaulagiri_settings['task_tracker']['expire']
 
     def track(self, task):
         r = self.__redis
@@ -164,25 +157,24 @@ class RedisTaskTracker(BaseTaskTracker):
 
 
 class RedisClient(object):
-    @staticmethod
-    def _init_redis():
-        import redis
-        from utils import load_yaml
-
-        cfg = load_yaml()
-        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
-        host = redis_conf['host']
-        port = int(redis_conf['port'])
-
-        return redis.StrictRedis(host=host, port=port, db=0)
-
     def _get_redis(self):
         return self._redis
 
     redis = property(_get_redis)
 
-    def __init__(self):
-        self._redis = self._init_redis()
+    def __init__(self, profile):
+        try:
+            redis_config = filter(lambda v: v['profile'] == profile, dhaulagiri_settings['redis'])[0]
+        except IndexError:
+            raise ValueError('Invalid redis profile: %s' % profile)
+
+        self.host = redis_config['host']
+        self.port = redis_config['port']
+        self.db_no = redis_config['db_no']
+
+        import redis
+
+        self._redis = redis.StrictRedis(host=self.host, port=self.port, db=self.db_no)
 
     def get(self, key):
         return self._redis.get(key)
@@ -283,17 +275,28 @@ class ProcessorEngine(LoggerMixin):
 
         return processor_dict
 
-    def parse_tracking(self, args):
-        if not args.track:
-            return
+    @staticmethod
+    def parse_tracking():
+        # Base argument parser
+        import argparse
 
-        # 默认有效期为3天
-        expire = 3600 * 24 * 3
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--track', action='store_true')
+        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
+        parser.add_argument('--track-exp', default=None, type=str)
+        args, leftover = parser.parse_known_args()
+
+        tracker_settings = dhaulagiri_settings['task_tracker']
+        tracker_settings['tracking'] = args.track
+        if not tracker_settings['tracking']:
+            return
 
         if args.track_exp:
             match = re.search(r'([\d\.]+)(\w)', args.track_exp)
             val = float(match.group(1))
             unit = match.group(2)
+
+            expire = None
             if unit == 'd':
                 expire = val * 3600 * 24
             elif unit == 'h':
@@ -303,29 +306,22 @@ class ProcessorEngine(LoggerMixin):
             elif unit == 's':
                 expire = val
 
-        engine = self
-        return TaskTrackerFactory.get_instance(engine, args.track, expire)
+            if expire:
+                tracker_settings['expire'] = expire
+
+        return TaskTrackerFactory.get_instance()
 
     def __init__(self):
-        import argparse
         from utils import load_yaml
 
         self.settings = load_yaml()
 
         LoggerMixin.__init__(self)
 
-        # Base argument parser
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--track', action='store_true')
-        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
-        parser.add_argument('--track-exp', default=None, type=str)
-        args, leftover = parser.parse_known_args()
-        self.arg_parser = parser
-
-        self._redis_client = RedisClient()
+        self._redis_client = RedisClient('engine')
 
         # 获得TaskTracker
-        self.task_tracker = self.parse_tracking(args)
+        self.task_tracker = self.parse_tracking()
 
         self.request = RequestHelper.from_engine(self)
         self.middleware_manager = MiddlewareManager.from_engine(self)
