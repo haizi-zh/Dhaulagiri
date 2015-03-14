@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import argparse
 
 from processors import BaseProcessor
 from utils.database import get_mongodb
@@ -97,8 +98,9 @@ class DianpingFetcher(BaseProcessor):
         BaseProcessor.__init__(self, *args, **kwargs)
         self.args = self.args_builder()
 
-    def args_builder(self):
-        parser = self.arg_parser
+    @staticmethod
+    def args_builder():
+        parser = argparse.ArgumentParser()
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=str)

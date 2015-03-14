@@ -146,12 +146,17 @@ class BaseProcessor(LoggerMixin):
         # 默认的polling间隔为1秒
         self.polling_interval = 1
 
-        self.arg_parser = self.engine.arg_parser
+        import argparse
+
+        arg_parser = argparse.ArgumentParser()
         # 并发数量
-        self.arg_parser.add_argument('--concur', default=20, type=int)
-        ret, leftover = self.arg_parser.parse_known_args()
-        self.args = ret
-        self.concur = ret.concur
+        arg_parser.add_argument('--concur', type=int)
+        args, leftover = arg_parser.parse_known_args()
+
+        from core import dhaulagiri_settings
+        if args.concur:
+            dhaulagiri_settings['core']['concur'] = args.concur
+        self.concur =dhaulagiri_settings['core']['concur']
 
         self.checkpoint_ts = None
         self.checkpoint_prog = None

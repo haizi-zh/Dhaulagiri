@@ -44,13 +44,18 @@ class ProxyMiddleware(DownloadMiddleware):
 
     def __init__(self, manager):
         from utils.locking import RWLock
+        import argparse
 
         DownloadMiddleware.__init__(self, manager)
 
-        parser = manager.engine.arg_parser
+        parser = argparse.ArgumentParser()
         parser.add_argument('--proxy', action='store_true')
         args, leftover = parser.parse_known_args()
-        if not args.proxy:
+
+        from core import dhaulagiri_settings
+
+        dhaulagiri_settings['proxy']['enabled'] = args.proxy
+        if not dhaulagiri_settings['proxy']['enabled']:
             raise RuntimeError
 
         self.rw_lock = RWLock()
