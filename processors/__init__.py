@@ -49,7 +49,7 @@ class Worker(object):
                 # Task tracking机制已启用
                 if task_tracker.track(task):
                     self.logger.debug('Task %s bypassed' % getattr(task, 'task_key'))
-                    self.bypassed_cnt += 1
+                    self.processor.bypassed_cnt += 1
                     continue
 
             self.logger.debug('Task #%d started' % self.total_tasks)
@@ -137,7 +137,11 @@ class BaseProcessor(LoggerMixin):
         self.redis_lock = Lock()
 
         self.progress = 0
+
         self.total = 0
+        # 忽略统计
+        self.bypassed_cnt = 0
+
         # 超过这一限制时，add_task就暂停向其中添加任务
         self.maxsize = 1000
         self.tasks = LifoQueue()
@@ -154,9 +158,10 @@ class BaseProcessor(LoggerMixin):
         args, leftover = arg_parser.parse_known_args()
 
         from core import dhaulagiri_settings
+
         if args.concur:
             dhaulagiri_settings['core']['concur'] = args.concur
-        self.concur =dhaulagiri_settings['core']['concur']
+        self.concur = dhaulagiri_settings['core']['concur']
 
         self.checkpoint_ts = None
         self.checkpoint_prog = None
@@ -281,8 +286,8 @@ class BaseProcessor(LoggerMixin):
 
         import time
 
-        self.log('Processor ended. %d items processed in %d minutes' % (self.progress,
-                                                                        int((time.time() - self.init_ts) / 60.0)))
+        self.log('Processor ended: %d items processed(%d bypassed) in %d minutes'%
+                 (self.progress, self.bypassed_cnt, int((time.time() - self.init_ts) / 60.0)))
 
     def populate_tasks(self):
         raise NotImplementedError
