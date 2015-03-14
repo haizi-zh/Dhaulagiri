@@ -1,14 +1,16 @@
 # coding=utf-8
 import logging
 import re
-from time import time
 
 from gevent.lock import BoundedSemaphore
 
 from middlewares import MiddlewareManager
+from utils import load_yaml
 
 
 __author__ = 'zephyre'
+
+dhaulagiri_settings = load_yaml()
 
 
 class LoggerMixin(object):
@@ -43,8 +45,16 @@ class LoggerMixin(object):
         parser.add_argument('--logpath', type=str)
         args, leftovers = parser.parse_known_args()
 
+        if 'logging' not in dhaulagiri_settings:
+            dhaulagiri_settings['logging']={}
+        if args.verbose:
+            dhaulagiri_settings['logging']['write_to_file'] = False
+        if args.debug:
+            dhaulagiri_settings['logging']['log_level']=logging.DEBUG
+        if args.logpath:
+            dhaulagiri_settings['logging']['log_path'] = args.logpath
+
         import os
-        import logging
         from logging.handlers import TimedRotatingFileHandler
         from logging import StreamHandler, Formatter
 
@@ -58,14 +68,11 @@ class LoggerMixin(object):
         sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
         logger = logging.getLogger('%s-%s' % (name, sig))
 
-        if args.verbose:
+        if not dhaulagiri_settings['logging']['write_to_file']:
             handler = StreamHandler()
         else:
-            if args.logpath:
-                log_path = os.path.abspath(args.logpath)
-            else:
-                log_path = '/var/log/dhaulagiri'
-                # log_path = os.path.abspath(os.path.join(os.path.split(__file__)[0], '../log'))
+            log_path = os.path.abspath(dhaulagiri_settings['logging']['log_path'])
+
             try:
                 os.mkdir(log_path)
             except OSError:
@@ -74,7 +81,7 @@ class LoggerMixin(object):
             log_file = os.path.normpath(os.path.join(log_path, '%s.log' % name))
             handler = TimedRotatingFileHandler(log_file, when='d', interval=1, encoding='utf-8')
 
-        log_level = logging.DEBUG if args.debug else logging.INFO
+        log_level = dhaulagiri_settings['logging']['log_level']
         handler.setLevel(log_level)
 
         formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
@@ -120,6 +127,7 @@ class RedisTaskTracker(BaseTaskTracker):
     """
     使用Redis作为TaskTracker
     """
+
     def __init__(self, redis, expire):
         """
         初始化

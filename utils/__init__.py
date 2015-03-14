@@ -1,4 +1,6 @@
 # coding=utf-8
+import logging
+
 __author__ = 'zephyre'
 
 
@@ -34,6 +36,23 @@ def load_yaml():
                             config[k] = v
                 except IOError:
                     continue
+
+    try:
+        log_level = config['logging']['log_level'].upper()
+        if log_level == 'CRITICAL':
+            log_level = logging.CRITICAL
+        elif log_level in ('WARN', 'WARNING'):
+            log_level = logging.WARN
+        elif log_level == 'INFO':
+            log_level = logging.INFO
+        elif log_level == 'DEBUG':
+            log_level = logging.DEBUG
+        else:
+            raise ValueError('Invalid logging level: %s' % log_level)
+
+        config['logging']['log_level'] = log_level
+    except (KeyError, AttributeError):
+        pass
 
     setattr(load_yaml, 'config', config)
     return config
