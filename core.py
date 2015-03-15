@@ -1,14 +1,16 @@
 # coding=utf-8
 import logging
 import re
-from time import time
 
 from gevent.lock import BoundedSemaphore
 
 from middlewares import MiddlewareManager
+from utils import load_yaml
 
 
 __author__ = 'zephyre'
+
+dhaulagiri_settings = load_yaml()
 
 
 class LoggerMixin(object):
@@ -38,13 +40,25 @@ class LoggerMixin(object):
         import argparse
 
         parser = argparse.ArgumentParser()
-        parser.add_argument('--verbose', action='store_true')
+        parser.add_argument('--quiet', action='store_true')
+        parser.add_argument('--log2file', action='store_true')
         parser.add_argument('--debug', action='store_true')
         parser.add_argument('--logpath', type=str)
         args, leftovers = parser.parse_known_args()
 
+        if 'logging' not in dhaulagiri_settings:
+            dhaulagiri_settings['logging'] = {}
+
+        if args.log2file:
+            dhaulagiri_settings['logging']['write_to_file'] = True
+        if args.quiet:
+            dhaulagiri_settings['logging']['write_to_stream'] = False
+        if args.debug:
+            dhaulagiri_settings['logging']['log_level'] = logging.DEBUG
+        if args.logpath:
+            dhaulagiri_settings['logging']['log_path'] = args.logpath
+
         import os
-        import logging
         from logging.handlers import TimedRotatingFileHandler
         from logging import StreamHandler, Formatter
 
@@ -58,30 +72,32 @@ class LoggerMixin(object):
         sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
         logger = logging.getLogger('%s-%s' % (name, sig))
 
-        if args.verbose:
-            handler = StreamHandler()
-        else:
-            if args.logpath:
-                log_path = os.path.abspath(args.logpath)
-            else:
-                log_path = '/var/log/dhaulagiri'
-                # log_path = os.path.abspath(os.path.join(os.path.split(__file__)[0], '../log'))
+        handler_list = []
+        if dhaulagiri_settings['logging']['write_to_stream']:
+            handler_list.append(StreamHandler())
+        if dhaulagiri_settings['logging']['write_to_file']:
+            log_path = os.path.abspath(dhaulagiri_settings['logging']['log_path'])
+
             try:
                 os.mkdir(log_path)
             except OSError:
                 pass
 
             log_file = os.path.normpath(os.path.join(log_path, '%s.log' % name))
-            handler = TimedRotatingFileHandler(log_file, when='d', interval=1, encoding='utf-8')
+            handler = TimedRotatingFileHandler(log_file, when='D', interval=1, encoding='utf-8')
+            handler_list.append(handler)
 
-        log_level = logging.DEBUG if args.debug else logging.INFO
-        handler.setLevel(log_level)
-
+        log_level = dhaulagiri_settings['logging']['log_level']
         formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
                               datefmt='%Y-%m-%d %H:%M:%S%z')
-        handler.setFormatter(formatter)
 
-        logger.addHandler(handler)
+        if not handler_list:
+            handler_list.append(logging.NullHandler())
+        for handler in handler_list:
+            handler.setLevel(log_level)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
         logger.setLevel(log_level)
 
         return logger
@@ -89,8 +105,8 @@ class LoggerMixin(object):
 
 class TaskTrackerFactory(object):
     @classmethod
-    def get_instance(cls, engine, tracker_name, expire):
-        return RedisTaskTracker(engine.redis_cli, expire)
+    def get_instance(cls):
+        return RedisTaskTracker()
 
 
 class BaseTaskTracker(object):
@@ -120,16 +136,10 @@ class RedisTaskTracker(BaseTaskTracker):
     """
     使用Redis作为TaskTracker
     """
-    def __init__(self, redis, expire):
-        """
-        初始化
 
-        :param redis: RedisClient对象
-        :param expire: Task的过期时间
-        :return:
-        """
-        self.__redis = redis
-        self.expire = expire
+    def __init__(self):
+        self.__redis = RedisClient('task-tracker')
+        self.expire = dhaulagiri_settings['task_tracker']['expire']
 
     def track(self, task):
         r = self.__redis
@@ -147,25 +157,24 @@ class RedisTaskTracker(BaseTaskTracker):
 
 
 class RedisClient(object):
-    @staticmethod
-    def _init_redis():
-        import redis
-        from utils import load_yaml
-
-        cfg = load_yaml()
-        redis_conf = filter(lambda v: v['profile'] == 'task-track', cfg['redis'])[0]
-        host = redis_conf['host']
-        port = int(redis_conf['port'])
-
-        return redis.StrictRedis(host=host, port=port, db=0)
-
     def _get_redis(self):
         return self._redis
 
     redis = property(_get_redis)
 
-    def __init__(self):
-        self._redis = self._init_redis()
+    def __init__(self, profile):
+        try:
+            redis_config = filter(lambda v: v['profile'] == profile, dhaulagiri_settings['redis'])[0]
+        except IndexError:
+            raise ValueError('Invalid redis profile: %s' % profile)
+
+        self.host = redis_config['host']
+        self.port = redis_config['port']
+        self.db_no = redis_config['db_no']
+
+        import redis
+
+        self._redis = redis.StrictRedis(host=self.host, port=self.port, db=self.db_no)
 
     def get(self, key):
         return self._redis.get(key)
@@ -266,17 +275,28 @@ class ProcessorEngine(LoggerMixin):
 
         return processor_dict
 
-    def parse_tracking(self, args):
-        if not args.track:
-            return
+    @staticmethod
+    def parse_tracking():
+        # Base argument parser
+        import argparse
 
-        # 默认有效期为3天
-        expire = 3600 * 24 * 3
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--track', action='store_true')
+        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
+        parser.add_argument('--track-exp', default=None, type=str)
+        args, leftover = parser.parse_known_args()
+
+        tracker_settings = dhaulagiri_settings['task_tracker']
+        tracker_settings['tracking'] = args.track
+        if not tracker_settings['tracking']:
+            return
 
         if args.track_exp:
             match = re.search(r'([\d\.]+)(\w)', args.track_exp)
             val = float(match.group(1))
             unit = match.group(2)
+
+            expire = None
             if unit == 'd':
                 expire = val * 3600 * 24
             elif unit == 'h':
@@ -286,29 +306,22 @@ class ProcessorEngine(LoggerMixin):
             elif unit == 's':
                 expire = val
 
-        engine = self
-        return TaskTrackerFactory.get_instance(engine, args.track, expire)
+            if expire:
+                tracker_settings['expire'] = expire
+
+        return TaskTrackerFactory.get_instance()
 
     def __init__(self):
-        import argparse
         from utils import load_yaml
 
         self.settings = load_yaml()
 
         LoggerMixin.__init__(self)
 
-        # Base argument parser
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--track', action='store_true')
-        # task tracking的有效期。支持以下格式1d, 1h, 1m, 1s
-        parser.add_argument('--track-exp', default=None, type=str)
-        args, leftover = parser.parse_known_args()
-        self.arg_parser = parser
-
-        self._redis_client = RedisClient()
+        self._redis_client = RedisClient('engine')
 
         # 获得TaskTracker
-        self.task_tracker = self.parse_tracking(args)
+        self.task_tracker = self.parse_tracking()
 
         self.request = RequestHelper.from_engine(self)
         self.middleware_manager = MiddlewareManager.from_engine(self)

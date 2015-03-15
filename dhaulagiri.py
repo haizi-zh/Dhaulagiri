@@ -54,23 +54,6 @@ def reg_processors(proc_dir=None):
                 raise
 
 
-def test():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('cmd')
-    args, leftovers = parser.parse_known_args()
-
-    load_yaml()
-
-    reg_processors()
-
-    if args.cmd in conf.global_conf['processors']:
-        parser_cls = conf.global_conf['processors'][args.cmd]
-        proc = parser_cls(arg_parser=parser)
-        proc.run()
-    else:
-        print 'No processor found for: %s' % args.cmd
-
-
 def main():
     from core import ProcessorEngine
 

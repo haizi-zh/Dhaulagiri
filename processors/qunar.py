@@ -1,4 +1,5 @@
 # coding=utf-8
+import argparse
 from hashlib import md5
 import json
 import re
@@ -26,7 +27,7 @@ class QunarPoiProcessor(BaseProcessor):
         self.denom = None
 
     def args_builder(self):
-        parser = self.arg_parser
+        parser = argparse.ArgumentParser()
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--cat', required=True, choices=['dining', 'shopping', 'hotel'], type=str)
@@ -229,7 +230,7 @@ class QunarFetcher(BaseProcessor):
         """
         根据参数，获得action对象
         """
-        parser = self.arg_parser
+        parser = argparse.ArgumentParser()
         parser.add_argument('--action', type=str, required=True)
         args, leftover = parser.parse_known_args()
         self.args = args
@@ -257,7 +258,7 @@ class QunarFetcher(BaseProcessor):
             return actions[action_name]
 
     def args_builder(self):
-        parser = self.arg_parser
+        parser = argparse.ArgumentParser()
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=str)
