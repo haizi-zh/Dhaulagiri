@@ -1,5 +1,6 @@
 # coding=utf-8
 from hashlib import md5
+import json
 import re
 
 import pymongo
@@ -108,6 +109,7 @@ class QunarPoiProcessor(BaseProcessor):
         cursor.execute('SELECT COUNT(*) AS cnt FROM qunar_%s WHERE hotScore<%d' % (
             'meishi' if poi_type == 'dining' else 'gouwu', entry['hotScore']))
         data['hotness'] = float(cursor.fetchone()['cnt']) / self.denom
+        # TODO rating和hotness不能一样
         data['rating'] = data['hotness']
 
         col_im = get_mongodb('raw_qunar', 'Image', profile='mongo-raw')
@@ -176,141 +178,181 @@ class QunarPoiProcessor(BaseProcessor):
                 self.add_task(func)
 
 
-class QunarCommentImport(BaseProcessor):
+def status_code_validator(response, allowed_codes):
+    return response.status_code in allowed_codes
+
+
+def security_validator(response):
+    return 'security.qunar.com' not in response.url
+
+
+def qunar_validator(response):
     """
-    将去哪儿POI的评论导入到数据库中
+    验证返回结果，处理去哪儿限制爬虫的情况
+    """
+    return status_code_validator(response, [200]) and security_validator(response)
+
+
+def qunar_size_validator(response, min_size=None, max_size=None):
+    """
+    根据response的size进行验证
+    """
+    sz = len(response.text)
+    if min_size and sz < min_size:
+        return False
+    if max_size and sz > max_size:
+        return False
+    return True
+
+
+def qunar_json_validator(response):
+    try:
+        response.json()['data']
+    except (ValueError, KeyError):
+        return False
+
+    return True
+
+
+class QunarFetcher(BaseProcessor):
+    """
+    根据去哪儿的POI数据，补充相应的信息
     """
 
-    @staticmethod
-    def process_avatar(avatar):
-        avatar = avatar.strip()
-        if not avatar:
-            return None
-
-        from hashlib import md5
-
-        key = md5(avatar).hexdigest()
-        url_hash = key
-
-        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
-        col_im = get_mongodb('imagestore', 'Images', 'mongo')
-
-        url = avatar
-        image = {'url': url, 'key': key, 'url_hash': url_hash}
-
-        if not col_im.find_one({'url_hash': url_hash}, {'_id'}):
-            col_cand.update({'url_hash', url_hash}, {'$set': image})
-
-        return image
-
-    def populate_tasks(self):
-        col_dining = get_mongodb('poi', 'Restaurant', 'mongo')
-        col_shopping = get_mongodb('poi', 'Shopping', 'mongo')
-        col_cmt = get_mongodb('raw_qunar', 'QunarPoiComment', 'mongo')
-
-        poi_id_list = col_cmt.distinct("poi_id")
-
-        for val in poi_id_list:
-            def func(poi_id=val):
-                # 查找poi_id对应的item
-                item = None
-                for col in [col_dining, col_shopping]:
-                    item = col.find_one({'source.qunar.id': poi_id}, {'_id': 1})
-                    if item:
-                        break
-
-                if not item:
-                    return
-
-                for entry in col_cmt.find({'poi_id': poi_id}):
-                    comment = {'source': {'qunar': {'id': poi_id}}, 'itemId': item['_id'], 'rating': entry['rating']}
-                    if 'images' in entry and entry['images']:
-                        images = []
-                        for img in entry['images']:
-                            img_entry = self.process_avatar(img['url'])
-                            if img_entry:
-                                images.append(img_entry)
-                        if images:
-                            comment['images'] = images
-
-                    if 'user_avatar' in entry and entry['user_avatar']:
-                        img_entry = self.process_avatar(entry['user_avatar'])
-                        if img_entry:
-                            comment['authorAvatar'] = img_entry['key']
-
-                    if 'user_name' in entry and entry['user_name']:
-                        pass
-
-        cursor = col_cmt.find(query).sort('source.qunar.id', pymongo.ASCENDING)
-        if self.args.limit:
-            cursor.limit(self.args.limit)
-        cursor.skip(self.args.skip)
-
-
-    name = 'qunar-poi-import'
+    name = 'qunar.fetch'
 
     def __init__(self, *args, **kwargs):
         BaseProcessor.__init__(self, *args, **kwargs)
         self.args = self.args_builder()
+
+    def get_action(self):
+        """
+        根据参数，获得action对象
+        """
+        parser = self.arg_parser
+        parser.add_argument('--action', type=str, required=True)
+        args, leftover = parser.parse_known_args()
+        self.args = args
+
+        context = {
+            'limit': self.args.limit,
+            'skip': self.args.skip,
+            'query': self.args.query,
+            'type': self.args.type,
+            'batch_size': self.args.batch_size
+        }
+
+        fetcher = self
+        actions = {
+            'comment-spider': QunarCommentSpider(fetcher, context),
+            'poi-spider': QunarPoiSpider(fetcher, context),
+            'image-spider': QunarImageSpider(fetcher, context),
+            'comment-proc': QunarCommentProcessor(fetcher, context)
+        }
+        action_name = self.args.action
+        if action_name not in actions:
+            self.logger.critical('Unknown action name: %s' % action_name)
+            return
+        else:
+            return actions[action_name]
 
     def args_builder(self):
         parser = self.arg_parser
         parser.add_argument('--limit', default=None, type=int)
         parser.add_argument('--skip', default=0, type=int)
         parser.add_argument('--query', type=str)
+        parser.add_argument('--batch-size', type=int)
         parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
         args, leftover = parser.parse_known_args()
         return args
 
-    @staticmethod
-    def validator(response):
-        if response.status_code != 200 or 'security.qunar.com' in response.url:
-            return False
+    def populate_tasks(self):
+        action = self.get_action()
+        cursor = action.build_cursor()
+
+        for val in cursor:
+            def func(entry=val):
+                action.process(entry)
+
+            setattr(func, 'task_key', 'task:qunar.fetch:%s:%s' % (self.args.action, val['_id']))
+            self.add_task(func)
+
+
+class QunarPoiSpider(object):
+    """
+    补充去哪儿POI的数据（主要是评分）
+    """
+
+    def __init__(self, fetcher, context):
+        self.fetcher = fetcher
+        self.request = fetcher.request
+        self.logger = fetcher.logger
+        self.redis = fetcher.engine.redis_cli
+        self.context = context
+
+    def build_cursor(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
+        col = get_mongodb('poi', col_name, 'mongo')
+        query = {'source.qunar.id': {'$ne': None}}
+        if self.context['query']:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.context['query'])]}
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.context['limit']:
+            cursor.limit(self.context['limit'])
+        cursor.skip(self.context['skip'])
+        if self.context['batch_size']:
+            sz = self.context['batch_size']
+            self.logger.warn('Set the cursor batch size to %d' % sz)
+            cursor.batch_size(sz)
+        return cursor
+
+    def process(self, entry):
+        qunar_id = entry['source']['qunar']['id']
+        poi_url = 'http://travel.qunar.com/p-oi%d' % qunar_id
+
+        def val_func(v):
+            min_size = 4 * 1024
+            return qunar_size_validator(v, min_size) and security_validator(v) and status_code_validator(v, [200, 404])
+
+        response = self.request.get(poi_url, timeout=15, user_data={'ProxyMiddleware': {'validator': val_func}})
+        if response.status_code == 404:
+            return
+
+        from lxml import etree
+
+        tree_node = etree.fromstring(response.text, parser=etree.HTMLParser())
         try:
-            response.json()['data']
-        except (ValueError, KeyError):
-            return False
+            score_text = tree_node.xpath('//div[@class="scorebox clrfix"]/span[@class="cur_score"]/text()')[0]
+            score = float(score_text) / 5.0
+        except (IndexError, ValueError):
+            self.logger.warn('Failed to get rating: %s' % poi_url)
+            return
 
-        return True
+        if score > 0:
+            col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
+            col = get_mongodb('poi', col_name, 'mongo')
+            col.update({'_id': entry['_id']}, {'$set': {'rating': score}})
 
 
-class QunarCommentSpider(BaseProcessor):
+class QunarCommentSpider(object):
     """
     调用http://travel.qunar.com/place/api/html/comments/poi/3202964?sortField=1&img=true&pageSize=10&page=1接口，
     抓取去哪儿POI的评论数据
     """
-    name = 'qunar-poi-comment'
 
-    def __init__(self, *args, **kwargs):
-        BaseProcessor.__init__(self, *args, **kwargs)
-        self.args = self.args_builder()
-
-    def args_builder(self):
-        parser = self.arg_parser
-        parser.add_argument('--limit', default=None, type=int)
-        parser.add_argument('--skip', default=0, type=int)
-        parser.add_argument('--query', type=str)
-        parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
-        args, leftover = parser.parse_known_args()
-        return args
-
-    @staticmethod
-    def validator(response):
-        if response.status_code != 200 or 'security.qunar.com' in response.url:
-            return False
-        try:
-            response.json()['data']
-        except (ValueError, KeyError):
-            return False
-
-        return True
+    def __init__(self, fetcher, context):
+        self.fetcher = fetcher
+        self.request = fetcher.request
+        self.logger = fetcher.logger
+        self.redis = fetcher.engine.redis_cli
+        self.context = context
 
     def resolve_avatar(self, url):
         """
         根据url获得最终的链接地址（处理重定向问题）
         """
         ret_url = url
-
         response = self.request.get(url, allow_redirects=False)
         if response.status_code in [301, 302]:
             try:
@@ -323,16 +365,14 @@ class QunarCommentSpider(BaseProcessor):
     def parse_comments(self, data):
         from lxml import etree
         from datetime import datetime, timedelta
-
-        comment_list = []
-
-        node_list = []
+        from hashlib import md5
 
         try:
             node_list = etree.fromstring(data, etree.HTMLParser()).xpath(
                 '//ul[@id="comment_box"]/li[contains(@class,"e_comment_item")]')
         except ValueError:
             self.logger.warn(data)
+            return
 
         for comment_node in node_list:
             comment = {'comment_id': int(re.search(r'cmt_item_(\d+)', comment_node.xpath('./@id')[0]).group(1))}
@@ -373,162 +413,216 @@ class QunarCommentSpider(BaseProcessor):
             tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_pic"]/a/img[@src]/@src')
             if tmp:
                 avatar = re.sub(r'\?\w$', '', tmp[0])
-                comment['user_avatar'] = self.resolve_avatar(avatar)
+
+                redis_key = 'qunar:poi-comment:avatar:%s' % md5(avatar).hexdigest()
+                avatar_expire = 7 * 24 * 3600
+                comment['user_avatar'] = self.redis.get_cache(redis_key, lambda: self.resolve_avatar(avatar),
+                                                              expire=avatar_expire)
 
             tmp = comment_node.xpath('.//div[@class="e_comment_usr"]/div[@class="e_comment_usr_name"]/a/text()')
             if tmp and tmp[0].strip():
                 comment['user_name'] = tmp[0].strip()
 
-            comment_list.append(comment)
+            yield comment
 
-        return comment_list
-
-    def populate_tasks(self):
-        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
+    def build_cursor(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
         col = get_mongodb('poi', col_name, 'mongo')
-        col_raw = get_mongodb('raw_qunar', 'QunarPoiComment', 'mongo-raw')
-
         query = {'source.qunar.id': {'$ne': None}}
-        extra_query = eval(self.args.query) if self.args.query else {}
-        if extra_query:
-            query = {'$and': [query, extra_query]}
+        if self.context['query']:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.context['query'])]}
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.context['limit']:
+            cursor.limit(self.context['limit'])
+        cursor.skip(self.context['skip'])
+        return cursor
 
-        cursor = col.find(query, {'source.qunar.id'}).sort('source.qunar.id', pymongo.ASCENDING)
-        if self.args.limit:
-            cursor.limit(self.args.limit)
-        cursor.skip(self.args.skip)
-
+    def process(self, entry):
+        """
+        开始处理评论列表
+        """
+        col_raw = get_mongodb('raw_qunar', 'PoiComment', 'mongo-raw')
         tmpl = 'http://travel.qunar.com/place/api/html/comments/poi/%d?sortField=1&pageSize=%d&page=%d'
+        qunar_id = entry['source']['qunar']['id']
 
-        for val in cursor:
-            def func(entry=val):
-                qunar_id = entry['source']['qunar']['id']
+        page = 0
+        page_size = 50
 
-                page = 1
-                page_size = 50
-                while True:
-                    url = tmpl % (qunar_id, page_size, page)
-                    self.logger.info('Retrieving: poi: %d, page: %d, url: %s' % (qunar_id, page, url))
+        while True:
+            page += 1
+            comments_list_url = tmpl % (qunar_id, page_size, page)
+            self.logger.debug('Fetching: poi: %d, page: %d, url: %s' % (qunar_id, page, comments_list_url))
 
-                    try:
-                        response = self.request.get(url, timeout=15,
-                                                    user_data={'ProxyMiddleware': {'validator': self.validator}})
-                    except IOError:
-                        self.logger.warn('Failed to read %s due to IOError' % url)
-                        break
+            redis_key = 'qunar:poi-comment:list:%d:%d:%d' % (qunar_id, page_size, page)
 
-                    data = response.json()
-                    if data['errmsg'] != 'success':
-                        self.logger.warn('Error while retrieving %s, errmsg: %s' % (url, data['errmsg']))
-                        break
+            def get_comments_list():
+                """
+                获得评论列表的response body
+                """
+                validators = [qunar_validator, qunar_json_validator]
+                response = self.request.get(comments_list_url, timeout=15,
+                                            user_data={'ProxyMiddleware': {'validator': validators}})
+                return response.text
 
-                    comments = self.parse_comments(response.json()['data'])
-                    for c in comments:
-                        c['poi_id'] = qunar_id
-                        col_raw.update({'comment_id': c['comment_id']}, {'$set': c}, upsert=True)
+            try:
+                comments_list_expire = 3600 * 24
+                search_result_text = self.redis.get_cache(redis_key, get_comments_list, expire=comments_list_expire)
+                data = json.loads(search_result_text)
+            except (IOError, ValueError):
+                self.logger.warn('Fetching failed: %s' % comments_list_url)
+                break
 
-                    # 如果返回空列表，或者comments数量不足pageSize，说明已经到达最末页
-                    if not comments or len(comments) < page_size:
-                        break
+            if data['errmsg'] != 'success':
+                self.logger.warn('Fetching failed %s, errmsg: %s' % (comments_list_url, data['errmsg']))
+                break
 
-                    page += 1
-                    continue
+            tmp = self.parse_comments(data['data'])
+            comments = list(tmp) if tmp else []
+            for c in comments:
+                c['poi_id'] = qunar_id
+                col_raw.update({'comment_id': c['comment_id']}, {'$set': c}, upsert=True)
 
-            setattr(func, 'task_key', '%s:%d' % (self.name, val['source']['qunar']['id']))
-            self.add_task(func)
+            # 如果返回空列表，或者comments数量不足pageSize，说明已经到达最末页
+            if not comments or len(comments) < page_size:
+                return
 
 
-class QunarImageSpider(BaseProcessor):
+class QunarImageSpider(object):
     """
     调用http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=3202964接口，
     补全去哪儿POI的图像信息
     """
 
-    name = 'qunar-image-spider'
+    def __init__(self, fetcher, context):
+        self.fetcher = fetcher
+        self.request = fetcher.request
+        self.logger = fetcher.logger
+        self.redis = fetcher.engine.redis_cli
+        self.context = context
 
-    def __init__(self, *args, **kwargs):
-        BaseProcessor.__init__(self, *args, **kwargs)
-        self.args = self.args_builder()
-
-    def args_builder(self):
-        parser = self.arg_parser
-        parser.add_argument('--limit', default=None, type=int)
-        parser.add_argument('--skip', default=0, type=int)
-        parser.add_argument('--query', type=str)
-        parser.add_argument('--type', choices=['dining', 'shopping'], required=True, type=str)
-        args, leftover = parser.parse_known_args()
-        return args
-
-    @staticmethod
-    def validator(response):
-        if response.status_code != 200 or 'security.qunar.com' in response.url:
-            return False
-        try:
-            response.json()['data']
-        except (ValueError, KeyError):
-            return False
-
-        return True
-
-    def populate_tasks(self):
-        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.args.type]
+    def build_cursor(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
         col = get_mongodb('poi', col_name, 'mongo')
+        query = {'source.qunar.id': {'$ne': None}}
+        if self.context['query']:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.context['query'])]}
+        cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
+        if self.context['limit']:
+            cursor.limit(self.context['limit'])
+        cursor.skip(self.context['skip'])
+        return cursor
+
+    def process(self, entry):
+        qunar_id = entry['source']['qunar']['id']
+
+        image_list_url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
+        self.logger.debug('Processing poi: %d, url: %s' % (qunar_id, image_list_url))
+
+        try:
+            validators = [qunar_validator, qunar_json_validator]
+            response = self.request.get(image_list_url,
+                                        user_data={'ProxyMiddleware': {'validator': validators}})
+            images = response.json()['data']
+        except (IOError, ValueError, KeyError) as e:
+            self.logger.warn('Failed: %s' % image_list_url)
+            return
+
+        if not images:
+            return
 
         col_im = get_mongodb('imagestore', 'Images', 'mongo')
         col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
 
-        col_raw = get_mongodb('raw_qunar', 'QunarPoiImage', 'mongo-raw')
+        for idx, img_entry in enumerate(images):
+            url = img_entry['url']
+            key = md5(url).hexdigest()
+            url_hash = key
+            ord_idx = idx
 
+            image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord_idx}
+
+            if img_entry['userName']:
+                image['meta'] = {'userName': img_entry['userName']}
+
+            self.logger.debug('Retrieved image: %s, url=%s, poi=%d' % (key, url, qunar_id))
+            ops = {'$set': image, '$addToSet': {'itemIds': entry['_id']}}
+            ret = col_im.update({'url_hash': url_hash}, ops)
+            if not ret['updatedExisting']:
+                col_cand.update({'url_hash': url_hash}, ops, upsert=True)
+
+
+class QunarCommentProcessor(object):
+    """
+    导入去哪儿POI的评论信息
+    """
+
+    def __init__(self, fetcher, context):
+        self.fetcher = fetcher
+        self.request = fetcher.request
+        self.logger = fetcher.logger
+        self.redis = fetcher.engine.redis_cli
+        self.context = context
+
+    def build_cursor(self):
+        col_name = {'dining': 'Restaurant', 'shopping': 'Shopping'}[self.context['type']]
+        col = get_mongodb('poi', col_name, 'mongo')
         query = {'source.qunar.id': {'$ne': None}}
-        extra_query = eval(self.args.query) if self.args.query else {}
-        if extra_query:
-            query = {'$and': [query, extra_query]}
-
+        if self.context['query']:
+            exec 'from bson import ObjectId'
+            query = {'$and': [query, eval(self.context['query'])]}
         cursor = col.find(query, {'source.qunar.id': 1}).sort('source.qunar.id', pymongo.ASCENDING)
-        if self.args.limit:
-            cursor.limit(self.args.limit)
-        cursor.skip(self.args.skip)
+        if self.context['limit']:
+            cursor.limit(self.context['limit'])
+        cursor.skip(self.context['skip'])
+        return cursor
 
-        for val in cursor:
-            def func(entry=val):
-                qunar_id = entry['source']['qunar']['id']
+    @staticmethod
+    def update_images(comment):
+        """
+        根据原始的聊天，处理其中的图像
+        """
+        images = [comment['user_avatar']]
+        if 'images' in comment:
+            images_list = comment['images']
+            if images_list:
+                for img_item in images_list:
+                    images.append(img_item['url'])
 
-                # 在数据库中查询
-                ret = col_raw.find_one({'id': qunar_id}, {'data': 1})
-                if not ret:
-                    url = 'http://travel.qunar.com/place/api/poi/image?offset=0&limit=1000&poiId=%d' % qunar_id
-                    self.logger.info('Processing poi: %d, url: %s' % (qunar_id, url))
+        col_im = get_mongodb('imagestore', 'Images', 'mongo')
+        col_cand = get_mongodb('imagestore', 'ImageCandidates', 'mongo')
+        for image_url in images:
+            image_key = md5(image_url).hexdigest()
+            if not col_im.find_one({'key': image_key}, {'_id': 1}):
+                image_entry = {'key': image_key, 'url_hash': image_key, 'url': image_url}
+                col_cand.update({'key': image_key}, {'$set': image_entry}, upsert=True)
 
-                    try:
-                        response = self.request.get(url, user_data={'ProxyMiddleware': {'validator': self.validator}})
-                    except IOError:
-                        self.logger.warn('Failed to read %s due to IOError' % url)
-                        return
+    def process(self, entry):
+        qunar_id = entry['source']['qunar']['id']
+        col_raw = get_mongodb('raw_qunar', 'PoiComment', 'mongo-raw')
 
-                    if not response:
-                        self.logger.warn('Failed to read %s' % url)
-                        return
+        col_name = {'dining': 'RestaurantComment', 'shopping': 'ShoppingComment'}[self.context['type']]
+        col = get_mongodb('poi', col_name, 'mongo')
 
-                    data = response.json()['data']
-                    col_raw.update({'id': qunar_id}, {'$set': {'id': qunar_id, 'data': data}}, upsert=True)
-                else:
-                    data = ret['data']
+        for raw_comment in col_raw.find({'poi_id': qunar_id}):
+            self.update_images(raw_comment)
 
-                for idx, img_entry in enumerate(data):
-                    url = img_entry['url']
-                    key = md5(url).hexdigest()
-                    url_hash = key
-                    ord_idx = idx
+            comment = {'source': {'qunar': {'id': raw_comment['comment_id']}},
+                       'itemId': entry['_id'],
+                       'authorAvatar': md5(raw_comment['user_avatar']).hexdigest(),
+                       'authorName': raw_comment['user_name'],
+                       'title': raw_comment['title']}
+            if 'contents' in raw_comment and raw_comment['contents']:
+                comment['contents'] = raw_comment['contents']
+            if 'rating' in raw_comment and raw_comment['rating'] is not None:
+                comment['rating'] = raw_comment['rating']
+            timestamp = raw_comment['cTime']
+            from math import log10
 
-                    image = {'url': url, 'key': key, 'url_hash': url_hash, 'ord': ord_idx}
+            if log10(timestamp) < 10:
+                comment['publishTime'] = timestamp * 1000
+            else:
+                comment['publishTime'] = timestamp
 
-                    if img_entry['userName']:
-                        image['meta'] = {'userName': img_entry['userName']}
-
-                    self.logger.info('Retrieved image: %s, url=%s, poi=%d' % (key, url, qunar_id))
-                    ops = {'$set': image, '$addToSet': {'itemIds': entry['_id']}}
-                    ret = col_im.update({'url_hash': url_hash}, ops)
-                    if not ret['updatedExisting']:
-                        col_cand.update({'url_hash': url_hash}, ops, upsert=True)
-
-            self.add_task(func)
+            col.update({'source.qunar.id': raw_comment['comment_id']}, {'$set': comment}, upsert=True)

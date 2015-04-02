@@ -37,6 +37,7 @@ class MafengwoQuProcessor(BaseProcessor):
 
     def populate_tasks(self):
         mafengwo_Qu = get_mongodb('raw_faq', 'MafengwoQuestion', 'mongo-raw')
+
         cursor = mafengwo_Qu.find()
         for val in cursor:
             def task(entry=val):
@@ -70,6 +71,7 @@ class MafengwoQuProcessor(BaseProcessor):
         shareCnt = 0
         content = self.get_content(entry['body'])
         postType = "question"
+
         question = {'title': title, 'content': content, 'author': author, 'authorId': authorId, 'avatar': avatar,
                     'time': q_time, 'tags': tags, 'vsCnt': vsCnt, 'favorCnt': favorCnt, 'shareCnt': shareCnt,
                     'postType': postType}
@@ -149,6 +151,7 @@ class MafengwoAnProcessor(BaseProcessor):
         essence = False
         if entry.has_key('rec'):
             essence = True
+
         # 得到parentId
         Qu = get_mongodb('raw_faq', 'Question', 'mongo-raw')
         cursor = Qu.find({'source': {'mafengwo': {'id': q_id}}})
@@ -156,6 +159,7 @@ class MafengwoAnProcessor(BaseProcessor):
         if cursor:
             for val in cursor:
                 parentId = val['_id']
+
         favorCnt = dom[0].xpath('//a[@class="btn-zan"]/span/text()')[0]
         shareCnt = 0
         commentCnt = 0
@@ -408,6 +412,7 @@ class CtripAnProcessor(BaseProcessor):
                     new_div.append(new_img)
                     div_tag.append(new_div)
         return str(div_tag)
+
 
 
 
