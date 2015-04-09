@@ -36,7 +36,7 @@ class MafengwoQuProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        mafengwo_Qu = get_mongodb('raw_faq', 'MafengwoQuestion', 'mongo-raw')
+        mafengwo_Qu = get_mongodb('raw', 'MafengwoQuestion', 'mongo-raw')
 
         cursor = mafengwo_Qu.find()
         for val in cursor:
@@ -46,15 +46,23 @@ class MafengwoQuProcessor(BaseProcessor):
             self.add_task(task)
 
     def process_detail(self, entry):
-        q_id = entry['q_id']
+        q_id = int(entry['q_id'])
         source = {'mafengwo': {'id': q_id}}
         dom = soupparser.fromstring(entry['body'])
         title = dom[0].xpath('//div[@class="q-title"]/h1/text()')[0]
         author = dom[0].xpath('//div[@class="user-bar"]//a[@class="name"]/text()')[0]
-        authorId = dom[0].xpath('//div[@class="user-bar"]//a[@class="name"]/@href')[0]
-        tmp = re.search(r'\d+', authorId)
-        authorId = tmp.group()
+        #authorId = dom[0].xpath('//div[@class="user-bar"]//a[@class="name"]/@href')[0]
+        #tmp = re.search(r'\d+', authorId)
+        #authorId = tmp.group()
+        authorId=None
         avatar = dom[0].xpath('//div[@class="avatar"]//img/@src')[0]
+        if len(avatar)==80:
+            if avatar[-4]=='.':
+                avatar=avatar[:67]+avatar[-4:]
+            elif avatar[-5]=='.':
+                avatar=avatar[:66]+avatar[-5:]
+        else:
+            avatar=None
         # 提取时间，转化为时间戳
         q_time = dom[0].xpath('//span[@class="time"]/text()')[0]
         q_time = '20%s' % q_time
@@ -64,7 +72,7 @@ class MafengwoQuProcessor(BaseProcessor):
         # 查看
         vsCnt = dom[0].xpath('//span[@class="visit"]/text()')[0]
         m = re.search(r'\d+', vsCnt)
-        vsCnt = m.group()
+        vsCnt = int(m.group())
         # 收藏
         favorCnt = 0
         # 分享
@@ -75,7 +83,7 @@ class MafengwoQuProcessor(BaseProcessor):
         question = {'title': title, 'content': content, 'author': author, 'authorId': authorId, 'avatar': avatar,
                     'time': q_time, 'tags': tags, 'vsCnt': vsCnt, 'favorCnt': favorCnt, 'shareCnt': shareCnt,
                     'postType': postType, 'quote': None}
-        mafengwo_Qu_clean = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        mafengwo_Qu_clean = get_mongodb('proc', 'Question', 'mongo-raw')
         mafengwo_Qu_clean.update({'source': source}, {'$set': question}, upsert=True)
 
     def get_content(self, body_html):
@@ -124,7 +132,7 @@ class MafengwoAnProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        mafengwo_An = get_mongodb('raw_faq', 'MafengwoAnswer', 'mongo-raw')
+        mafengwo_An = get_mongodb('raw', 'MafengwoAnswer', 'mongo-raw')
         cursor = mafengwo_An.find()
         for val in cursor:
             def task(entry=val):
@@ -133,13 +141,21 @@ class MafengwoAnProcessor(BaseProcessor):
             self.add_task(task)
 
     def process_detail(self, entry):
-        q_id = entry['q_id']
-        a_id = entry['a_id']
+        q_id = int(entry['q_id'])
+        a_id = int(entry['a_id'])
         source = {'mafengwo': {'id': a_id}}
         dom = soupparser.fromstring(entry['body'])
         author = dom[0].xpath('//div[@class="user-bar"]/a[@class="name"]/text()')[0]
-        authorId = dom[0].xpath('//div[@class="avatar _j_user_card"]/@data-uid')[0]
+        #authorId = dom[0].xpath('//div[@class="avatar _j_user_card"]/@data-uid')[0]
+        authorId=None
         avatar = dom[0].xpath('//div[@class="avatar _j_user_card"]//img[@class="_j_filter_click"]/@src')[0]
+        if len(avatar)==80:
+            if avatar[-4]=='.':
+                avatar=avatar[:67]+avatar[-4:]
+            elif avatar[-5]=='.':
+                avatar=avatar[:66]+avatar[-5:]
+        else:
+            avatar=None
         # 提取时间，转化为时间戳
         q_time = dom[0].xpath('//span[@class="time"]/text()')[0]
         match_num = re.findall(r'\d+', q_time)
@@ -153,7 +169,7 @@ class MafengwoAnProcessor(BaseProcessor):
             essence = True
 
         # 得到parentId
-        Qu = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        Qu = get_mongodb('proc', 'Question', 'mongo-raw')
         cursor = Qu.find({'source': {'mafengwo': {'id': q_id}}})
         parentId = None
         if cursor:
@@ -161,6 +177,7 @@ class MafengwoAnProcessor(BaseProcessor):
                 parentId = val['_id']
 
         favorCnt = dom[0].xpath('//a[@class="btn-zan"]/span/text()')[0]
+        favorCnt=int(favorCnt)
         shareCnt = 0
         commentCnt = 0
         if dom[0].xpath('//span[@class="_j_answer_cnum"]/text()'):
@@ -170,7 +187,7 @@ class MafengwoAnProcessor(BaseProcessor):
         answer = {'content': content, 'author': author, 'authorId': authorId, 'avatar': avatar, 'time': q_time,
                   'commentCnt': commentCnt, 'favorCnt': favorCnt, 'shareCnt': shareCnt, 'postType': postType,
                   'essence': essence, 'parentId': parentId, 'quote': None}
-        mafengwo_An_clean = get_mongodb('raw_faq', 'Answer', 'mongo-raw')
+        mafengwo_An_clean = get_mongodb('proc', 'Answer', 'mongo-raw')
         mafengwo_An_clean.update({'source': source}, {'$set': answer}, upsert=True)
 
     def get_content(self, body_html):
@@ -218,7 +235,7 @@ class CtripQuProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        ctrip_Qu = get_mongodb('raw_faq', 'CtripQuestion', 'mongo-raw')
+        ctrip_Qu = get_mongodb('raw', 'CtripQuestion', 'mongo-raw')
         cursor = ctrip_Qu.find()
         for val in cursor:
             def task(entry=val):
@@ -227,13 +244,13 @@ class CtripQuProcessor(BaseProcessor):
             self.add_task(task)
 
     def process_detail(self, entry):
-        q_id = entry['q_id']
+        q_id = int(entry['q_id'])
         source = {'ctrip': {'id': q_id}}
         dom = soupparser.fromstring(entry['body'])
         title = dom[0].xpath('//h1[@class="ask_title"]//text()')[1]
         author = dom[0].xpath('//a[@class="ask_username"]/text()')[0]
-        authorId = ""
-        avatar = ""
+        authorId = None
+        avatar = None
         # 提取时间，转化为时间戳
         q_time = dom[0].xpath('//span[@class="ask_time"]/text()')[0]
         if len(re.findall(r'\d+', q_time)) <= 1:
@@ -248,16 +265,16 @@ class CtripQuProcessor(BaseProcessor):
         vsCnt = 0
         # 收藏
         favorTmp = dom[0].xpath('//a[@class="link_share"]/span/text()')
-        favorCnt = 0 if not favorTmp else favorTmp[0]
+        favorCnt = 0 if not favorTmp else int(favorTmp[0])
         # 分享
         shareTmp = dom[0].xpath('//a[@class="link_share"]/span/text()')
-        shareCnt = 0 if not favorTmp else shareTmp[0]
+        shareCnt = 0 if not favorTmp else int(shareTmp[0])
         content = self.get_content(entry['body'])
         postType = "question"
         question = {'title': title, 'content': content, 'author': author, 'authorId': authorId,
                     'avatar': avatar, 'time': q_time, 'tags': tags, 'vsCnt': vsCnt, 'favorCnt': favorCnt,
                     'shareCnt': shareCnt, 'postType': postType, 'quote': None}
-        ctrip_Qu_clean = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        ctrip_Qu_clean = get_mongodb('proc', 'Question', 'mongo-raw')
         ctrip_Qu_clean.update({'source': source}, {'$set': question}, upsert=True)
 
     def get_content(self, body_html):
@@ -320,7 +337,7 @@ class CtripAnProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        ctrip_An = get_mongodb('raw_faq', 'CtripAnswer', 'mongo-raw')
+        ctrip_An = get_mongodb('raw', 'CtripAnswer', 'mongo-raw')
         cursor = ctrip_An.find()
         for val in cursor:
             def task(entry=val):
@@ -334,8 +351,13 @@ class CtripAnProcessor(BaseProcessor):
         source = {'ctrip': {'id': a_id}}
         dom = soupparser.fromstring(entry['body'])
         author = dom[0].xpath('//p[@class="answer_user"]/a[@class="answer_id"]/text()')[0]
-        authorId = ""
+        authorId = None
         avatar = dom[0].xpath('//a[@class="answer_img"]/img/@src')[0]
+        if len(avatar)==64:
+            avatar=None
+        #'http://images4.c-ctrip.com/target/headphoto/portrait_100_100.jpg'
+        else:
+            avatar=avatar[0:-12]+avatar[-4:]
         # 提取时间，转化为时间戳
         q_time = dom[0].xpath('//span[@class="answer_time"]/text()')[0]
         if len(re.findall(r'\d+', q_time)) <= 1:
@@ -349,23 +371,24 @@ class CtripAnProcessor(BaseProcessor):
         if entry.has_key('rec'):
             essence = True
         # 得到parentId
-        Qu = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        Qu = get_mongodb('proc', 'Question', 'mongo-raw')
         cursor = Qu.find({'source': {'ctrip': {'id': q_id}}})
         parentId = None
         if cursor:
             for val in cursor:
                 parentId = val['_id']
         favorTmp = dom[0].xpath('//a[@class="btn_answer_zan"]/span/text()')
-        favorCnt = 0 if not favorTmp else favorTmp[0]
+        favorCnt = 0 if not favorTmp else int(favorTmp[0])
         shareCnt = 0
         comments = dom[0].xpath('//ul[@class="answer_comment_list"]/li')
         commentCnt = len(comments)
+        #print q_id,a_id
         content = self.get_content(entry['body'])
         postType = "answer"
         answer = {'content': content, 'author': author, 'authorId': authorId, 'avatar': avatar, 'time': q_time,
                   'commentCnt': commentCnt, 'favorCnt': favorCnt, 'shareCnt': shareCnt, 'postType': postType,
                   'essence': essence, 'parentId': parentId, 'quote': None}
-        mafengwo_An_clean = get_mongodb('raw_faq', 'Answer', 'mongo-raw')
+        mafengwo_An_clean = get_mongodb('proc', 'Answer', 'mongo-raw')
         mafengwo_An_clean.update({'source': source}, {'$set': answer}, upsert=True)
 
     def get_content(self, body_html):
@@ -377,21 +400,32 @@ class CtripAnProcessor(BaseProcessor):
         content = '<div class="article"></div>'
         Con = BeautifulSoup(content)
         div_tag = Con.div
-        for child in ask_text.children:
-            # 如果是链接的话
-            if child.name == "a":
-                inner_href = child.get('href')
-                new_a = Con.new_tag("a", href=inner_href)
-                new_a.string = child.string
-                div_tag.append(new_a)
-                new_span = Con.new_tag("span")
-                new_span['class'] = "qa_link"
-                # swap标签包在a的外面
-                new_a.wrap(new_span)
-            # 如果是文字或者</br>的话的话
-            else:
-                newStr = copy.deepcopy(child)
-                div_tag.append(newStr)
+
+        # 处理文字和链接
+        def process_content(ask_text):
+
+            for child in ask_text.children:
+                # 如果是链接的话
+                if child.name == "a":
+                    if len(child.contents) > 1 or not child.get_text():
+                        # 递归调用
+                        process_content(child)
+                        continue
+                    inner_href = child.get('href')
+                    new_a = Con.new_tag("a", href=inner_href)
+                    new_a.string = child.string
+                    div_tag.append(new_a)
+                    new_span = Con.new_tag("span")
+                    new_span['class'] = "qa_link"
+                    # swap标签包在a的外面
+                    new_a.wrap(new_span)
+                # 如果是文字或者</br>的话的话
+                else:
+                    newStr = copy.deepcopy(child)
+                    div_tag.append(newStr)
+
+        process_content(ask_text)
+
         # 图片列表
         ask_piclist = soup.find('div', class_='ask_piclist cf')
         if ask_piclist:
@@ -428,7 +462,7 @@ class QunarQuProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        qunar_Qu = get_mongodb('raw_faq', 'QunarQuestion', 'mongo-raw')
+        qunar_Qu = get_mongodb('raw', 'QunarQuestion', 'mongo-raw')
         cursor = qunar_Qu.find()
         for val in cursor:
             def task(entry=val):
@@ -437,7 +471,7 @@ class QunarQuProcessor(BaseProcessor):
             self.add_task(task)
 
     def process_detail(self, entry):
-        q_id = entry['q_id']
+        q_id = int(entry['q_id'])
         source = {'qunar': {'id': q_id}}
         # 原始数据格式不统一
         if isinstance(entry['title'], list):
@@ -446,9 +480,12 @@ class QunarQuProcessor(BaseProcessor):
         title = title_tmp.get_text()
         dom = soupparser.fromstring(entry['body'])
         author = dom[0].xpath('//div[@class="authi"]/a/@title')[0]
-        authorHref = dom[0].xpath('//div[@class="authi"]/a/@href')[0]
-        authorId = re.search(r'\d+', authorHref).group()
+        #authorHref = dom[0].xpath('//div[@class="authi"]/a/@href')[0]
+        #authorId = re.search(r'\d+', authorHref).group()
+        authorId=None
         avatar = dom[0].xpath('//a[@class="avtm"]/img/@src')[0]
+        avatar=self.request.get(avatar).url
+        avatar=avatar[0:-26]+avatar[-3:]
         # 提取时间，转化为时间戳
         time_tmp = dom[0].xpath('//div[@class="authi"]/em/span/@title')
         if time_tmp:
@@ -463,7 +500,7 @@ class QunarQuProcessor(BaseProcessor):
         # 查看
         vsCnt = 0
         # 收藏
-        favorCnt = dom[0].xpath('//span[@id="favoritenumber"]/text()')[0]
+        favorCnt = int(dom[0].xpath('//span[@id="favoritenumber"]/text()')[0])
         # 分享
         shareCnt = 0
         content_quote = self.get_content_quote(entry['body'])
@@ -473,7 +510,7 @@ class QunarQuProcessor(BaseProcessor):
         question = {'title': title, 'content': content, 'quote': quote, 'author': author, 'authorId': authorId,
                     'avatar': avatar, 'time': q_time, 'tags': tags, 'vsCnt': vsCnt, 'favorCnt': favorCnt,
                     'shareCnt': shareCnt, 'postType': postType}
-        qunar_Qu_clean = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        qunar_Qu_clean = get_mongodb('proc', 'Question', 'mongo-raw')
         qunar_Qu_clean.update({'source': source}, {'$set': question}, upsert=True)
 
 
@@ -643,7 +680,7 @@ class QunarAnProcessor(BaseProcessor):
         self.args, leftover = parser.parse_known_args()
 
     def populate_tasks(self):
-        qunar_An = get_mongodb('raw_faq', 'QunarAnswer', 'mongo-raw')
+        qunar_An = get_mongodb('raw', 'QunarAnswer', 'mongo-raw')
         cursor = qunar_An.find()
         for val in cursor:
             def task(entry=val):
@@ -654,13 +691,17 @@ class QunarAnProcessor(BaseProcessor):
     def process_detail(self, entry):
         q_id = entry['q_id']
         a_id = entry['post_id']
+        #print q_id,a_id
         source = {'qunar': {'id': a_id}}
         dom = soupparser.fromstring(entry['body'])
         author = dom[0].xpath('//div[@class="authi"]/a/@title')[0]
-        authorHref = dom[0].xpath('//div[@class="authi"]/a/@href')[0]
-        tmp = re.search(r'\d+', authorHref)
-        authorId = tmp.group()
+        #authorHref = dom[0].xpath('//div[@class="authi"]/a/@href')[0]
+        #tmp = re.search(r'\d+', authorHref)
+        #authorId = tmp.group()
+        authorId=None
         avatar = dom[0].xpath('//a[@class="avtm"]/img/@src')[0]
+        avatar=self.request.get(avatar).url
+        avatar=avatar[0:-26]+avatar[-3:]
         # 提取时间，转化为时间戳
         time_tmp = dom[0].xpath('//div[@class="authi"]/em/span/@title')
         if time_tmp:
@@ -674,7 +715,7 @@ class QunarAnProcessor(BaseProcessor):
         q_time = int(time.mktime(q_time))
         # 收藏
         if dom[0].xpath('//a[@class="replyadd"]/span/text()'):
-            favorCnt = dom[0].xpath('//a[@class="replyadd"]/span/text()')[0]
+            favorCnt = int(dom[0].xpath('//a[@class="replyadd"]/span/text()')[0])
         else:
             favorCnt = 0
         # 分享
@@ -682,24 +723,24 @@ class QunarAnProcessor(BaseProcessor):
         commentCnt = 0
         essence = False
         # 得到parentId
-        Qu = get_mongodb('raw_faq', 'Question', 'mongo-raw')
+        Qu = get_mongodb('proc', 'Question', 'mongo-raw')
         cursor = Qu.find({'source': {'qunar': {'id': q_id}}})
         parentId = None
         if cursor:
             for val in cursor:
                 parentId = val['_id']
-        content_quote = self.get_content_quote(entry['body'], q_id)
+        content_quote = self.get_content_quote(entry['body'])
         content = content_quote['content']
         quote = content_quote['quote']
         postType = "answer"
         answer = {'content': content, 'author': author, 'authorId': authorId, 'avatar': avatar, 'time': q_time,
                   'commentCnt': commentCnt, 'favorCnt': favorCnt, 'shareCnt': shareCnt, 'postType': postType,
                   'essence': essence, 'parentId': parentId, "quote": quote}
-        qunar_Qu_clean = get_mongodb('raw_faq', 'Answer', 'mongo-raw')
+        qunar_Qu_clean = get_mongodb('proc', 'Answer', 'mongo-raw')
         qunar_Qu_clean.update({'source': source}, {'$set': answer}, upsert=True)
 
 
-    def get_content_quote(self, body_html, q_id):
+    def get_content_quote(self, body_html):
         """
           将原始数据里body变成清洗后的content和quote
         """
