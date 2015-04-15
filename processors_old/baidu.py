@@ -3,7 +3,7 @@ import json
 import logging
 import re
 
-from processors import BaseProcessor
+from processors_old import BaseProcessor
 from utils.database import get_mongodb
 from utils.mixin import MfwSuggestion, BaiduSuggestion
 

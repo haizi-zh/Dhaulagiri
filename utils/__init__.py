@@ -142,3 +142,49 @@ def haversine(lon1, lat1, lon2, lat2):
     # 6367 km is the radius of the Earth
     km = 6367 * c
     return km
+
+
+def get_logger(name='dhaulagiri'):
+    logging_config = load_yaml()['logging']
+
+    import os
+    from logging.handlers import TimedRotatingFileHandler
+    from logging import StreamHandler, Formatter
+
+    # Set up a specific logger with our desired output level
+    from hashlib import md5
+    from random import randint
+    import sys
+
+    sig = md5('%d' % randint(0, sys.maxint)).hexdigest()[:8]
+    logger = logging.getLogger('%s-%s' % (name, sig))
+
+    handler_list = []
+    if logging_config['write_to_stream']:
+        handler_list.append(StreamHandler())
+    if logging_config['write_to_file']:
+        log_path = os.path.abspath(logging_config['log_path'])
+
+        try:
+            os.mkdir(log_path)
+        except OSError:
+            pass
+
+        log_file = os.path.normpath(os.path.join(log_path, '%s.log' % name))
+        handler = TimedRotatingFileHandler(log_file, when='D', interval=1, encoding='utf-8')
+        handler_list.append(handler)
+
+    log_level = logging_config['log_level']
+    formatter = Formatter(fmt='%(asctime)s [%(name)s] [%(threadName)s] %(levelname)s: %(message)s',
+                          datefmt='%Y-%m-%d %H:%M:%S%z')
+
+    if not handler_list:
+        handler_list.append(logging.NullHandler())
+    for handler in handler_list:
+        handler.setLevel(log_level)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    logger.setLevel(log_level)
+
+    return logger

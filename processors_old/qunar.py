@@ -6,7 +6,7 @@ import re
 
 import pymongo
 
-from processors import BaseProcessor
+from processors_old import BaseProcessor
 from utils.database import get_mongodb, get_mysql_db
 
 

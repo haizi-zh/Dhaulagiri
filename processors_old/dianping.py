@@ -4,7 +4,7 @@ import logging
 import re
 import argparse
 
-from processors import BaseProcessor
+from processors_old import BaseProcessor
 from utils.database import get_mongodb
 
 

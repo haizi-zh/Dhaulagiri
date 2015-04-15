@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from processors import BaseProcessor
+from processors_old import BaseProcessor
 from utils.database import get_mongodb
 from utils.mixin import BaiduSuggestion
 from math import radians, asin, sqrt, cos, sin

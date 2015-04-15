@@ -7,7 +7,7 @@ from hashlib import md5
 
 from lxml.sax import ElementTreeContentHandler
 
-from processors import BaseProcessor
+from processors_old import BaseProcessor
 from utils import haversine
 from utils.database import get_mongodb
 from utils.mixin import BaiduSuggestion, MfwSuggestion
